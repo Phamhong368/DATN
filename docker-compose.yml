@@ -1,0 +1,60 @@
+services:
+  db:
+    image: mysql:8.4
+    container_name: tms-db
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: tms_demo
+      MYSQL_ROOT_PASSWORD: tms_root_123
+      MYSQL_USER: tms_user
+      MYSQL_PASSWORD: tms_pass_123
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./database/tms_demo_full.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-ptms_root_123"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: tms-backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PORT: 4000
+      JWT_SECRET: super-secret-demo-key
+      DB_HOST: db
+      DB_PORT: 3306
+      DB_NAME: tms_demo
+      DB_USER: root
+      DB_PASSWORD: tms_root_123
+      PYTHONPYCACHEPREFIX: /tmp/codex-python-cache
+    ports:
+      - "4000:4000"
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        VITE_API_URL: /api
+        VITE_GOOGLE_MAPS_API_KEY: ${VITE_GOOGLE_MAPS_API_KEY:-}
+    container_name: tms-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_started
+    ports:
+      - "8080:80"
+
+volumes:
+  mysql_data:
+
