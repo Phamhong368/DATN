@@ -26,10 +26,22 @@ router.post(
       return res.status(400).json({ message: `Missing fields: ${missing.join(', ')}` });
     }
 
-    const { license_plate, truck_type, capacity_tons, status = 'AVAILABLE' } = req.body;
+    const {
+      license_plate,
+      truck_type,
+      capacity_tons,
+      status = 'AVAILABLE',
+      cumulative_km = 0,
+      maintenance_interval_km = 10000,
+      last_maintenance_km = 0,
+      last_maintenance_date = null
+    } = req.body;
     const result = await query(
-      'INSERT INTO trucks (license_plate, truck_type, capacity_tons, status) VALUES (?, ?, ?, ?)',
-      [license_plate, truck_type, capacity_tons, status]
+      `INSERT INTO trucks (
+         license_plate, truck_type, capacity_tons, status, cumulative_km,
+         maintenance_interval_km, last_maintenance_km, last_maintenance_date
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [license_plate, truck_type, capacity_tons, status, cumulative_km, maintenance_interval_km, last_maintenance_km, last_maintenance_date]
     );
 
     const rows = await query('SELECT * FROM trucks WHERE id = ?', [result.insertId]);
@@ -45,12 +57,33 @@ router.put(
     }
 
     const { id } = req.params;
-    const { license_plate, truck_type, capacity_tons, status } = req.body;
+    const {
+      license_plate,
+      truck_type,
+      capacity_tons,
+      status,
+      cumulative_km = 0,
+      maintenance_interval_km = 10000,
+      last_maintenance_km = 0,
+      last_maintenance_date = null
+    } = req.body;
     await query(
       `UPDATE trucks
-       SET license_plate = ?, truck_type = ?, capacity_tons = ?, status = ?
+       SET license_plate = ?, truck_type = ?, capacity_tons = ?, status = ?,
+           cumulative_km = ?, maintenance_interval_km = ?,
+           last_maintenance_km = ?, last_maintenance_date = ?
        WHERE id = ?`,
-      [license_plate, truck_type, capacity_tons, status, id]
+      [
+        license_plate,
+        truck_type,
+        capacity_tons,
+        status,
+        cumulative_km,
+        maintenance_interval_km,
+        last_maintenance_km,
+        last_maintenance_date,
+        id
+      ]
     );
     const rows = await query('SELECT * FROM trucks WHERE id = ?', [id]);
     res.json(rows[0]);

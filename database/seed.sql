@@ -1,6 +1,7 @@
 DELETE FROM trip_status_logs;
 DELETE FROM trip_orders;
 DELETE FROM trips;
+DELETE FROM fuel_logs;
 DELETE FROM route_optimization_stops;
 DELETE FROM route_optimization_routes;
 DELETE FROM route_optimization_orders;
@@ -22,6 +23,7 @@ ALTER TABLE orders AUTO_INCREMENT = 1;
 ALTER TABLE trips AUTO_INCREMENT = 1;
 ALTER TABLE trip_orders AUTO_INCREMENT = 1;
 ALTER TABLE trip_status_logs AUTO_INCREMENT = 1;
+ALTER TABLE fuel_logs AUTO_INCREMENT = 1;
 ALTER TABLE depots AUTO_INCREMENT = 1;
 ALTER TABLE route_optimizations AUTO_INCREMENT = 1;
 ALTER TABLE route_optimization_orders AUTO_INCREMENT = 1;
@@ -38,12 +40,15 @@ INSERT INTO users (role_id, username, password_hash, full_name) VALUES
   (2, 'dispatcher', '$2a$10$1irC5egGwuVQOUpI1kYVCe.ULkmhcqj466dP1IYIoxjC94Pn/7SPS', 'Trần Thị Điều Phối'),
   (3, 'driver1', '$2a$10$1irC5egGwuVQOUpI1kYVCe.ULkmhcqj466dP1IYIoxjC94Pn/7SPS', 'Phạm Văn Tài Xế');
 
-INSERT INTO trucks (license_plate, truck_type, capacity_tons, status) VALUES
-  ('51C-12345', 'Thùng kín', 8.00, 'AVAILABLE'),
-  ('43H-67890', 'Container 40ft', 25.00, 'IN_USE'),
-  ('29H-24680', 'Mui bạt', 15.00, 'AVAILABLE'),
-  ('77C-13579', 'Đông lạnh', 10.00, 'MAINTENANCE'),
-  ('60H-11223', 'Sơ mi rơ moóc', 20.00, 'AVAILABLE');
+INSERT INTO trucks (
+  license_plate, truck_type, capacity_tons, status, cumulative_km,
+  maintenance_interval_km, last_maintenance_km, last_maintenance_date
+) VALUES
+  ('51C-12345', 'Thùng kín', 8.00, 'AVAILABLE', 48200, 10000, 40000, '2026-02-10'),
+  ('43H-67890', 'Container 40ft', 25.00, 'IN_USE', 119500, 15000, 108000, '2026-01-22'),
+  ('29H-24680', 'Mui bạt', 15.00, 'AVAILABLE', 76150, 12000, 72000, '2026-03-01'),
+  ('77C-13579', 'Đông lạnh', 10.00, 'MAINTENANCE', 93420, 10000, 83000, '2025-12-15'),
+  ('60H-11223', 'Sơ mi rơ moóc', 20.00, 'AVAILABLE', 55680, 14000, 42000, '2026-02-28');
 
 INSERT INTO drivers (user_id, full_name, phone, license_number, license_class, status) VALUES
   (3, 'Phạm Văn Tài Xế', '0905000001', 'FC001', 'FC', 'ON_TRIP'),
@@ -94,3 +99,37 @@ INSERT INTO trip_status_logs (trip_id, status, updated_by, note) VALUES
   (2, 'ASSIGNED', 2, 'Đã gán chuyến'),
   (2, 'COMPLETED', 2, 'Đơn hàng đã hoàn tất'),
   (3, 'ASSIGNED', 2, 'Chờ tài xế xác nhận');
+
+INSERT INTO fuel_logs (
+  truck_id, trip_id, log_date, distance_km, fuel_liters, payload_tons,
+  idle_minutes, avg_speed_kmh, cumulative_km_after, notes
+) VALUES
+  (1, NULL, '2026-03-12', 120.0, 19.6, 4.5, 18, 46.0, 47010.0, 'Phân phối nội vùng'),
+  (1, NULL, '2026-03-20', 180.0, 28.8, 5.2, 25, 48.0, 47190.0, 'Tuyến liên tỉnh ngắn'),
+  (1, 1, '2026-04-02', 245.0, 38.7, 6.1, 35, 44.0, 47435.0, 'Chuyến ghép đơn'),
+  (1, NULL, '2026-04-14', 310.0, 47.9, 7.0, 32, 50.0, 47745.0, 'Tuyến Bắc Nam chặng đầu'),
+  (1, NULL, '2026-04-21', 455.0, 68.9, 7.6, 48, 47.0, 48200.0, 'Hàng tải nặng'),
+
+  (2, NULL, '2026-03-08', 260.0, 56.2, 16.0, 40, 43.0, 117820.0, 'Container nội địa'),
+  (2, NULL, '2026-03-18', 340.0, 71.9, 18.5, 55, 41.0, 118160.0, 'Kẹt cảng'),
+  (2, 1, '2026-04-01', 420.0, 86.1, 20.0, 30, 45.0, 118580.0, 'Chuyến tuyến dài'),
+  (2, NULL, '2026-04-12', 380.0, 79.7, 17.0, 42, 44.0, 118960.0, 'Về kho'),
+  (2, NULL, '2026-04-23', 540.0, 110.8, 22.5, 58, 42.0, 119500.0, 'Container quá cảnh'),
+
+  (3, NULL, '2026-03-05', 140.0, 24.1, 8.0, 20, 49.0, 74890.0, 'Chuyến ngắn'),
+  (3, 2, '2026-03-16', 210.0, 34.8, 9.5, 22, 50.0, 75100.0, 'Hàng hỗn hợp'),
+  (3, NULL, '2026-03-28', 330.0, 51.5, 11.0, 33, 46.0, 75430.0, 'Đường đèo'),
+  (3, NULL, '2026-04-11', 290.0, 45.8, 10.4, 28, 48.0, 75720.0, 'Tuyến miền Trung'),
+  (3, NULL, '2026-04-24', 430.0, 66.7, 12.7, 44, 45.0, 76150.0, 'Giao đa điểm'),
+
+  (4, NULL, '2026-03-10', 160.0, 31.5, 5.5, 26, 42.0, 90940.0, 'Xe lạnh tải nhẹ'),
+  (4, NULL, '2026-03-22', 250.0, 46.8, 6.5, 31, 43.0, 91190.0, 'Bảo quản lạnh'),
+  (4, NULL, '2026-04-04', 305.0, 57.2, 7.2, 35, 41.0, 91495.0, 'Dừng máy lạnh nhiều'),
+  (4, NULL, '2026-04-16', 410.0, 76.9, 8.1, 46, 40.0, 91905.0, 'Tải lạnh liên tỉnh'),
+  (4, NULL, '2026-04-24', 515.0, 95.8, 8.8, 54, 39.0, 92420.0, 'Chu kỳ lạnh kéo dài'),
+
+  (5, NULL, '2026-03-07', 230.0, 44.0, 12.5, 24, 47.0, 54010.0, 'Sơ mi rơ moóc tuyến ngắn'),
+  (5, NULL, '2026-03-21', 360.0, 67.9, 14.0, 34, 45.0, 54370.0, 'Tuyến công trình'),
+  (5, 3, '2026-04-06', 415.0, 77.6, 15.0, 29, 48.0, 54785.0, 'Nhận chuyến Bắc'),
+  (5, NULL, '2026-04-15', 390.0, 73.3, 13.2, 38, 46.0, 55175.0, 'Chạy hàng vật liệu'),
+  (5, NULL, '2026-04-24', 505.0, 94.1, 16.8, 41, 44.0, 55680.0, 'Tải lớn đường dài');

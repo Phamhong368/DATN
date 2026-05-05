@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Navigate, Route, Routes, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
+import mapboxgl from 'mapbox-gl';
+import 'mapbox-gl/dist/mapbox-gl.css';
 import {
   Bar,
   BarChart,
@@ -25,12 +27,18 @@ const navItems = [
   { key: 'trips', label: 'Chuyến hàng', path: '/trips', roles: ['DISPATCHER'] },
   { key: 'optimizer', label: 'Tối ưu lộ trình', path: '/optimizer', roles: ['DISPATCHER'] },
   { key: 'optimizer-history', label: 'Lịch sử tối ưu', path: '/optimizer-history', roles: ['DISPATCHER'] },
-  { key: 'route-map', label: 'Bản đồ lộ trình', path: '/route-map', roles: ['DISPATCHER'] }
+  { key: 'route-map', label: 'Bản đồ lộ trình', path: '/route-map', roles: ['DISPATCHER'] },
+  { key: 'forecasting', label: 'Dự báo nhiên liệu', path: '/forecasting', roles: ['ADMIN', 'DISPATCHER'] }
 ];
 
 const orderStatusOptions = ['PENDING_DISPATCH', 'ASSIGNED', 'IN_TRANSIT', 'COMPLETED', 'CANCELLED'];
 const tripStatusOptions = ['PLANNED', 'ASSIGNED', 'IN_TRANSIT', 'COMPLETED', 'INCIDENT'];
-const googleMapsApiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
+const mapboxAccessToken = import.meta.env.VITE_MAPBOX_ACCESS_TOKEN || '';
+const roleById = {
+  1: 'ADMIN',
+  2: 'DISPATCHER',
+  3: 'DRIVER'
+};
 
 function useAuthState() {
   const [auth, setAuth] = useState(() => {
@@ -50,6 +58,13 @@ function formatCurrency(value) {
     style: 'currency',
     currency: 'VND',
     maximumFractionDigits: 0
+  }).format(Number(value || 0));
+}
+
+function formatNumber(value, digits = 1) {
+  return new Intl.NumberFormat('vi-VN', {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits
   }).format(Number(value || 0));
 }
 
@@ -76,9 +91,23 @@ function getStatusLabel(status) {
     CANCELLED: 'Đã hủy',
     PLANNED: 'Đã lên kế hoạch',
     INCIDENT: 'Sự cố',
-    ACTIVE: 'Đang hoạt động'
+    ACTIVE: 'Đang hoạt động',
+    CRITICAL: 'Quá hạn',
+    HIGH: 'Rất gấp',
+    MEDIUM: 'Sắp tới hạn',
+    LOW: 'Bình thường'
   };
   return labels[status] || status;
+}
+
+function getSeverityColor(severity) {
+  const palette = {
+    CRITICAL: '#b91c1c',
+    HIGH: '#ea580c',
+    MEDIUM: '#d97706',
+    LOW: '#15803d'
+  };
+  return palette[severity] || '#334155';
 }
 
 function renderFieldValue(fieldName, value) {
@@ -92,33 +121,109 @@ function getVisibleNavItems(role) {
   return navItems.filter((item) => item.roles.includes(role));
 }
 
-function loadGoogleMaps(apiKey) {
-  if (!apiKey) {
-    return Promise.reject(new Error('Thiếu VITE_GOOGLE_MAPS_API_KEY để tải Google Maps.'));
+function getGoogleMapsRouteErrorMessage(error) {
+  const rawMessage =
+    (typeof error === 'string' && error) ||
+    error?.message ||
+    error?.status ||
+    error?.code ||
+    '';
+
+  if (rawMessage === 'REQUEST_DENIED' || rawMessage === 'Permission Denied.') {
+    return 'Google Maps đã từ chối tính tuyến đường. Kiểm tra billing và quyền dùng Directions/Routes cho API key hiện tại.';
   }
 
-  if (window.google?.maps) {
-    return Promise.resolve(window.google.maps);
+  if (rawMessage === 'OVER_QUERY_LIMIT') {
+    return 'Google Maps đã vượt hạn mức truy vấn cho API key hiện tại.';
   }
 
-  const existingScript = document.querySelector('script[data-google-maps-loader="true"]');
-  if (existingScript) {
-    return new Promise((resolve, reject) => {
-      existingScript.addEventListener('load', () => resolve(window.google.maps), { once: true });
-      existingScript.addEventListener('error', () => reject(new Error('Không thể tải Google Maps.')), { once: true });
-    });
+  if (rawMessage === 'ZERO_RESULTS') {
+    return 'Không tìm thấy tuyến đường phù hợp giữa các địa điểm đã nhập.';
   }
 
-  return new Promise((resolve, reject) => {
-    const script = document.createElement('script');
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&loading=async`;
-    script.async = true;
-    script.defer = true;
-    script.dataset.googleMapsLoader = 'true';
-    script.onload = () => resolve(window.google.maps);
-    script.onerror = () => reject(new Error('Không thể tải Google Maps. Kiểm tra lại API key hoặc cấu hình billing.'));
-    document.head.appendChild(script);
+  if (rawMessage === 'NOT_FOUND') {
+    return 'Google Maps không xác định được một trong các địa chỉ đã nhập.';
+  }
+
+  return rawMessage || 'Không thể tính toán lộ trình.';
+}
+
+function buildRoutePreviewPoints(stops) {
+  if (!stops?.length) {
+    return [];
+  }
+
+  const coordinates = stops.map((stop) => stop.coordinate).filter(Boolean);
+  if (!coordinates.length) {
+    return [];
+  }
+
+  const lats = coordinates.map((point) => point.lat);
+  const lngs = coordinates.map((point) => point.lng);
+  const minLat = Math.min(...lats);
+  const maxLat = Math.max(...lats);
+  const minLng = Math.min(...lngs);
+  const maxLng = Math.max(...lngs);
+  const latSpan = Math.max(maxLat - minLat, 0.01);
+  const lngSpan = Math.max(maxLng - minLng, 0.01);
+
+  return stops.map((stop, index) => {
+    const x = 70 + ((stop.coordinate.lng - minLng) / lngSpan) * 560;
+    const y = 320 - ((stop.coordinate.lat - minLat) / latSpan) * 220;
+    return {
+      ...stop,
+      index,
+      x,
+      y
+    };
   });
+}
+
+function buildSmoothPath(points) {
+  if (!points.length) {
+    return '';
+  }
+
+  if (points.length === 1) {
+    return `M ${points[0].x} ${points[0].y}`;
+  }
+
+  let path = `M ${points[0].x} ${points[0].y}`;
+  for (let index = 1; index < points.length; index += 1) {
+    const previous = points[index - 1];
+    const current = points[index];
+    const controlX = (previous.x + current.x) / 2;
+    path += ` C ${controlX} ${previous.y}, ${controlX} ${current.y}, ${current.x} ${current.y}`;
+  }
+  return path;
+}
+
+async function fetchMapboxSuggestions(query) {
+  if (!mapboxAccessToken || query.trim().length < 3) {
+    return [];
+  }
+
+  const url = new URL(`https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(query)}.json`);
+  url.searchParams.set('access_token', mapboxAccessToken);
+  url.searchParams.set('autocomplete', 'true');
+  url.searchParams.set('limit', '5');
+  url.searchParams.set('country', 'vn');
+  url.searchParams.set('language', 'vi');
+
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error('Không tải được gợi ý địa chỉ từ Mapbox.');
+  }
+
+  const payload = await response.json();
+  return (payload.features || []).map((feature) => ({
+    id: feature.id,
+    label: feature.place_name,
+    coordinate: {
+      lng: feature.center?.[0],
+      lat: feature.center?.[1]
+    }
+  }));
 }
 
 function Layout({ auth, onLogout, children }) {
@@ -259,11 +364,428 @@ function DashboardPage({ summary }) {
   );
 }
 
-function RouteMapPage({ orders }) {
+function ForecastingPage({ token, trucks, refreshTrucks }) {
+  const [overview, setOverview] = useState(null);
+  const [fuelLogs, setFuelLogs] = useState([]);
+  const [selectedTruckId, setSelectedTruckId] = useState('');
+  const [trainingResult, setTrainingResult] = useState(null);
+  const [predictionResult, setPredictionResult] = useState(null);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [fuelLogForm, setFuelLogForm] = useState({
+    truck_id: '',
+    log_date: '',
+    distance_km: '',
+    fuel_liters: '',
+    payload_tons: '',
+    idle_minutes: '',
+    avg_speed_kmh: '45',
+    cumulative_km_after: '',
+    notes: ''
+  });
+  const [predictionForm, setPredictionForm] = useState({
+    distance_km: '',
+    payload_tons: '',
+    idle_minutes: '',
+    avg_speed_kmh: '45'
+  });
+
+  useEffect(() => {
+    refreshTrucks('trucks').catch((loadError) => {
+      console.error(loadError);
+    });
+  }, [refreshTrucks]);
+
+  async function loadAnalytics(truckId = selectedTruckId) {
+    setLoading(true);
+    setError('');
+    try {
+      const [overviewData, logData] = await Promise.all([
+        apiRequest('/analytics/overview', { token }),
+        apiRequest(`/analytics/fuel-logs${truckId ? `?truckId=${truckId}` : ''}`, { token })
+      ]);
+      setOverview(overviewData);
+      setFuelLogs(logData);
+    } catch (loadError) {
+      setError(loadError.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadAnalytics().catch((loadError) => {
+      setError(loadError.message);
+      setLoading(false);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (trucks.length > 0 && !fuelLogForm.truck_id) {
+      setFuelLogForm((prev) => ({ ...prev, truck_id: String(trucks[0].id) }));
+    }
+  }, [trucks, fuelLogForm.truck_id]);
+
+  async function handleAddFuelLog(event) {
+    event.preventDefault();
+    setError('');
+    try {
+      await apiRequest('/analytics/fuel-logs', {
+        token,
+        method: 'POST',
+        body: {
+          ...fuelLogForm,
+          truck_id: Number(fuelLogForm.truck_id),
+          distance_km: Number(fuelLogForm.distance_km),
+          fuel_liters: Number(fuelLogForm.fuel_liters),
+          payload_tons: Number(fuelLogForm.payload_tons || 0),
+          idle_minutes: Number(fuelLogForm.idle_minutes || 0),
+          avg_speed_kmh: Number(fuelLogForm.avg_speed_kmh || 45),
+          cumulative_km_after: Number(fuelLogForm.cumulative_km_after)
+        }
+      });
+      setFuelLogForm({
+        truck_id: '',
+        log_date: '',
+        distance_km: '',
+        fuel_liters: '',
+        payload_tons: '',
+        idle_minutes: '',
+        avg_speed_kmh: '45',
+        cumulative_km_after: '',
+        notes: ''
+      });
+      await Promise.all([loadAnalytics(selectedTruckId), refreshTrucks('trucks')]);
+    } catch (submitError) {
+      setError(submitError.message);
+    }
+  }
+
+  async function handleTrain(scopeTruckId = selectedTruckId) {
+    setError('');
+    try {
+      const result = await apiRequest('/analytics/train', {
+        token,
+        method: 'POST',
+        body: scopeTruckId ? { truckId: Number(scopeTruckId) } : {}
+      });
+      setTrainingResult(result);
+    } catch (trainError) {
+      setError(trainError.message);
+    }
+  }
+
+  async function handlePredict(event) {
+    event.preventDefault();
+    setError('');
+    try {
+      const result = await apiRequest('/analytics/predict', {
+        token,
+        method: 'POST',
+        body: {
+          ...(selectedTruckId ? { truckId: Number(selectedTruckId) } : {}),
+          distance_km: Number(predictionForm.distance_km),
+          payload_tons: Number(predictionForm.payload_tons || 0),
+          idle_minutes: Number(predictionForm.idle_minutes || 0),
+          avg_speed_kmh: Number(predictionForm.avg_speed_kmh || 45)
+        }
+      });
+      setPredictionResult(result);
+    } catch (predictError) {
+      setError(predictError.message);
+    }
+  }
+
+  async function handleMaintenanceReset(truckId) {
+    setError('');
+    try {
+      await apiRequest(`/analytics/trucks/${truckId}/maintenance-reset`, {
+        token,
+        method: 'POST'
+      });
+      await Promise.all([loadAnalytics(selectedTruckId), refreshTrucks('trucks')]);
+    } catch (resetError) {
+      setError(resetError.message);
+    }
+  }
+
+  const summary = overview?.summary || {};
+  const alerts = overview?.alerts || [];
+  const truckOverview = overview?.trucks || [];
+
+  return (
+    <section className="stack">
+      <div className="page-header">
+        <div>
+          <p className="eyebrow">Phân tích</p>
+          <h2>Dự báo tiêu thụ nhiên liệu và cảnh báo bảo trì</h2>
+        </div>
+        <div className="action-row">
+          <select
+            value={selectedTruckId}
+            onChange={(event) => {
+              const nextTruckId = event.target.value;
+              setSelectedTruckId(nextTruckId);
+              loadAnalytics(nextTruckId).catch((loadError) => setError(loadError.message));
+            }}
+          >
+            <option value="">Toàn đội xe</option>
+            {trucks.map((truck) => (
+              <option key={truck.id} value={truck.id}>{truck.license_plate}</option>
+            ))}
+          </select>
+          <button className="inline-button" onClick={() => loadAnalytics(selectedTruckId)}>Tải lại dữ liệu</button>
+          <button className="primary-button" onClick={() => handleTrain(selectedTruckId)}>Train Regression</button>
+        </div>
+      </div>
+
+      {error ? <p className="error-text">{error}</p> : null}
+
+      <div className="stats-grid">
+        <StatCard label="Tổng số xe" value={summary.totalTrucks || 0} />
+        <StatCard label="Cảnh báo quá hạn" value={summary.criticalAlerts || 0} />
+        <StatCard label="Cảnh báo gấp" value={summary.highAlerts || 0} />
+        <StatCard label="TB tiêu hao /100km" value={`${formatNumber(summary.averageConsumption || 0, 2)} L`} />
+      </div>
+
+      <div className="forecast-grid">
+        <div className="panel stack">
+          <div>
+            <h3>Ghi nhận dữ liệu huấn luyện</h3>
+            <p className="muted">Thêm log nhiên liệu mới để mô hình học từ quãng đường, tải trọng, thời gian chờ và tốc độ trung bình.</p>
+          </div>
+          <form className="stack" onSubmit={handleAddFuelLog}>
+            <label>
+              Xe
+              <select value={fuelLogForm.truck_id} onChange={(event) => setFuelLogForm((prev) => ({ ...prev, truck_id: event.target.value }))}>
+                <option value="">Chọn xe</option>
+                {trucks.map((truck) => (
+                  <option key={truck.id} value={truck.id}>{truck.license_plate}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Ngày ghi nhận
+              <input type="date" value={fuelLogForm.log_date} onChange={(event) => setFuelLogForm((prev) => ({ ...prev, log_date: event.target.value }))} />
+            </label>
+            <div className="time-window-grid">
+              <label>
+                Quãng đường (km)
+                <input type="number" step="0.1" value={fuelLogForm.distance_km} onChange={(event) => setFuelLogForm((prev) => ({ ...prev, distance_km: event.target.value }))} />
+              </label>
+              <label>
+                Nhiên liệu (lít)
+                <input type="number" step="0.1" value={fuelLogForm.fuel_liters} onChange={(event) => setFuelLogForm((prev) => ({ ...prev, fuel_liters: event.target.value }))} />
+              </label>
+              <label>
+                Tải trọng (tấn)
+                <input type="number" step="0.1" value={fuelLogForm.payload_tons} onChange={(event) => setFuelLogForm((prev) => ({ ...prev, payload_tons: event.target.value }))} />
+              </label>
+            </div>
+            <div className="time-window-grid">
+              <label>
+                Chờ nổ máy (phút)
+                <input type="number" value={fuelLogForm.idle_minutes} onChange={(event) => setFuelLogForm((prev) => ({ ...prev, idle_minutes: event.target.value }))} />
+              </label>
+              <label>
+                Tốc độ TB (km/h)
+                <input type="number" step="0.1" value={fuelLogForm.avg_speed_kmh} onChange={(event) => setFuelLogForm((prev) => ({ ...prev, avg_speed_kmh: event.target.value }))} />
+              </label>
+              <label>
+                Odometer sau chuyến
+                <input type="number" step="0.1" value={fuelLogForm.cumulative_km_after} onChange={(event) => setFuelLogForm((prev) => ({ ...prev, cumulative_km_after: event.target.value }))} />
+              </label>
+            </div>
+            <label>
+              Ghi chú
+              <textarea value={fuelLogForm.notes} onChange={(event) => setFuelLogForm((prev) => ({ ...prev, notes: event.target.value }))} />
+            </label>
+            <button className="primary-button">Lưu log nhiên liệu</button>
+          </form>
+        </div>
+
+        <div className="panel stack">
+          <div>
+            <h3>Dự báo nhiên liệu</h3>
+            <p className="muted">Dùng mô hình hồi quy đã train để ước tính số lít nhiên liệu cho chuyến sắp chạy.</p>
+          </div>
+          <form className="stack" onSubmit={handlePredict}>
+            <div className="time-window-grid">
+              <label>
+                Quãng đường (km)
+                <input type="number" step="0.1" value={predictionForm.distance_km} onChange={(event) => setPredictionForm((prev) => ({ ...prev, distance_km: event.target.value }))} />
+              </label>
+              <label>
+                Tải trọng (tấn)
+                <input type="number" step="0.1" value={predictionForm.payload_tons} onChange={(event) => setPredictionForm((prev) => ({ ...prev, payload_tons: event.target.value }))} />
+              </label>
+              <label>
+                Chờ nổ máy (phút)
+                <input type="number" value={predictionForm.idle_minutes} onChange={(event) => setPredictionForm((prev) => ({ ...prev, idle_minutes: event.target.value }))} />
+              </label>
+            </div>
+            <label>
+              Tốc độ TB (km/h)
+              <input type="number" step="0.1" value={predictionForm.avg_speed_kmh} onChange={(event) => setPredictionForm((prev) => ({ ...prev, avg_speed_kmh: event.target.value }))} />
+            </label>
+            <button className="primary-button">Dự báo tiêu hao</button>
+          </form>
+
+          {predictionResult ? (
+            <div className="forecast-result-card">
+              <strong>{formatNumber(predictionResult.predictedFuelLiters, 2)} lít</strong>
+              <p className="muted">Mức tiêu hao dự báo: {formatNumber(predictionResult.predictedConsumptionPer100Km, 2)} L / 100 km</p>
+            </div>
+          ) : null}
+
+          {trainingResult ? (
+            <div className="stack">
+              <div>
+                <h3>Kết quả train</h3>
+                <p className="muted">{trainingResult.targetLabel} | Mẫu train: {trainingResult.model.metrics.sampleSize}</p>
+              </div>
+              <div className="route-summary-grid">
+                <StatCard label="R²" value={formatNumber(trainingResult.model.metrics.r2, 4)} />
+                <StatCard label="MAE" value={`${formatNumber(trainingResult.model.metrics.mae, 3)} L`} />
+              </div>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Biến</th>
+                      <th>Hệ số</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {Object.entries(trainingResult.model.coefficients).map(([feature, value]) => (
+                      <tr key={feature}>
+                        <td>{feature}</td>
+                        <td>{formatNumber(value, 6)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : (
+            <p className="muted">Chưa train mô hình trong phiên làm việc này.</p>
+          )}
+        </div>
+      </div>
+
+      <div className="forecast-grid">
+        <div className="panel">
+          <h3>Cảnh báo bảo trì theo km tích lũy</h3>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Xe</th>
+                  <th>Km tích lũy</th>
+                  <th>Km từ lần bảo trì gần nhất</th>
+                  <th>Km còn lại</th>
+                  <th>Mức cảnh báo</th>
+                  <th>Khuyến nghị</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {alerts.map((alert) => (
+                  <tr key={alert.truckId}>
+                    <td>{alert.licensePlate}</td>
+                    <td>{formatNumber(alert.cumulativeKm, 0)}</td>
+                    <td>{formatNumber(alert.kmSinceMaintenance, 0)}</td>
+                    <td>{formatNumber(alert.remainingKm, 0)}</td>
+                    <td>
+                      <span className="status-badge" style={{ background: getSeverityColor(alert.severity) }}>
+                        {getStatusLabel(alert.severity)}
+                      </span>
+                    </td>
+                    <td>{alert.recommendedAction}</td>
+                    <td>
+                      <button className="inline-button" onClick={() => handleMaintenanceReset(alert.truckId)}>
+                        Reset bảo trì
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div className="panel">
+          <h3>Lịch sử train</h3>
+          {loading ? <p className="muted">Đang tải dữ liệu...</p> : null}
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Xe</th>
+                  <th>Số log</th>
+                  <th>TB tiêu hao/100km</th>
+                  <th>TB tải trọng</th>
+                  <th>Log gần nhất</th>
+                </tr>
+              </thead>
+              <tbody>
+                {truckOverview.map((truck) => (
+                  <tr key={truck.id}>
+                    <td>{truck.license_plate}</td>
+                    <td>{truck.fuel_log_count}</td>
+                    <td>{truck.avg_consumption_per_100km ? `${formatNumber(truck.avg_consumption_per_100km, 2)} L` : '--'}</td>
+                    <td>{truck.avg_payload_tons ? `${formatNumber(truck.avg_payload_tons, 2)} tấn` : '--'}</td>
+                    <td>{truck.latest_fuel_log_date || '--'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div className="panel">
+        <h3>Log nhiên liệu gần đây</h3>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Ngày</th>
+                <th>Xe</th>
+                <th>Km</th>
+                <th>Lít</th>
+                <th>Tải (tấn)</th>
+                <th>Chờ (phút)</th>
+                <th>TB km/h</th>
+                <th>Odometer</th>
+              </tr>
+            </thead>
+            <tbody>
+              {fuelLogs.map((row) => (
+                <tr key={row.id}>
+                  <td>{row.log_date}</td>
+                  <td>{row.license_plate}</td>
+                  <td>{formatNumber(row.distance_km, 1)}</td>
+                  <td>{formatNumber(row.fuel_liters, 1)}</td>
+                  <td>{formatNumber(row.payload_tons, 1)}</td>
+                  <td>{row.idle_minutes}</td>
+                  <td>{formatNumber(row.avg_speed_kmh, 1)}</td>
+                  <td>{formatNumber(row.cumulative_km_after, 0)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function RouteMapPage({ orders, token }) {
   const [searchParams] = useSearchParams();
-  const mapRef = useRef(null);
+  const mapContainerRef = useRef(null);
   const mapInstanceRef = useRef(null);
-  const directionsRendererRef = useRef(null);
+  const markerRefs = useRef([]);
   const [form, setForm] = useState({
     origin: '',
     destination: '',
@@ -271,8 +793,13 @@ function RouteMapPage({ orders }) {
     waypoints: []
   });
   const [mapError, setMapError] = useState('');
+  const [mapRenderError, setMapRenderError] = useState('');
   const [routeLoading, setRouteLoading] = useState(false);
   const [routeResult, setRouteResult] = useState(null);
+  const [addressSuggestions, setAddressSuggestions] = useState({ origin: [], destination: [] });
+  const [activeSuggestionField, setActiveSuggestionField] = useState('');
+  const [selectedLocations, setSelectedLocations] = useState({ origin: null, destination: null });
+  const previewPoints = useMemo(() => buildRoutePreviewPoints(routeResult?.stops || []), [routeResult]);
 
   useEffect(() => {
     const origin = searchParams.get('origin');
@@ -299,38 +826,28 @@ function RouteMapPage({ orders }) {
   }, [searchParams]);
 
   useEffect(() => {
-    let mounted = true;
+    if (!activeSuggestionField) {
+      return;
+    }
 
-    loadGoogleMaps(googleMapsApiKey)
-      .then((maps) => {
-        if (!mounted || !mapRef.current) {
-          return;
-        }
+    const query = form[activeSuggestionField];
+    if (!query || query.trim().length < 3) {
+      setAddressSuggestions((prev) => ({ ...prev, [activeSuggestionField]: [] }));
+      return;
+    }
 
-        if (!mapInstanceRef.current) {
-          mapInstanceRef.current = new maps.Map(mapRef.current, {
-            center: { lat: 16.0471, lng: 108.2068 },
-            zoom: 6,
-            streetViewControl: false,
-            mapTypeControl: false
-          });
+    const timer = setTimeout(() => {
+      fetchMapboxSuggestions(query)
+        .then((items) => {
+          setAddressSuggestions((prev) => ({ ...prev, [activeSuggestionField]: items }));
+        })
+        .catch(() => {
+          setAddressSuggestions((prev) => ({ ...prev, [activeSuggestionField]: [] }));
+        });
+    }, 250);
 
-          directionsRendererRef.current = new maps.DirectionsRenderer({
-            map: mapInstanceRef.current,
-            suppressMarkers: false
-          });
-        }
-      })
-      .catch((error) => {
-        if (mounted) {
-          setMapError(error.message);
-        }
-      });
-
-    return () => {
-      mounted = false;
-    };
-  }, []);
+    return () => clearTimeout(timer);
+  }, [activeSuggestionField, form]);
 
   async function handleCalculateRoute(event) {
     event.preventDefault();
@@ -338,46 +855,24 @@ function RouteMapPage({ orders }) {
     setRouteLoading(true);
 
     try {
-      const maps = await loadGoogleMaps(googleMapsApiKey);
-      const service = new maps.DirectionsService();
-      const result = await service.route({
-        origin: form.origin,
-        destination: form.destination,
-        travelMode: maps.TravelMode[form.travelMode],
-        waypoints: form.waypoints.map((waypoint) => ({
-          location: waypoint,
-          stopover: true
-        }))
+      const preview = await apiRequest('/optimizer/route-preview', {
+        token,
+        method: 'POST',
+        body: {
+          origin: selectedLocations.origin
+            ? { address: form.origin, coordinate: selectedLocations.origin.coordinate }
+            : form.origin,
+          destination: selectedLocations.destination
+            ? { address: form.destination, coordinate: selectedLocations.destination.coordinate }
+            : form.destination,
+          waypoints: form.waypoints,
+          travelMode: form.travelMode
+        }
       });
 
-      directionsRendererRef.current?.setDirections(result);
-      const legs = result.routes[0]?.legs || [];
-      const totalDistanceMeters = legs.reduce((sum, leg) => sum + (leg.distance?.value || 0), 0);
-      const totalDurationSeconds = legs.reduce((sum, leg) => sum + (leg.duration?.value || 0), 0);
-      setRouteResult({
-        distanceText: totalDistanceMeters ? `${(totalDistanceMeters / 1000).toFixed(1)} km` : '--',
-        durationText: totalDurationSeconds ? `${Math.round(totalDurationSeconds / 60)} phút` : '--',
-        startAddress: legs[0]?.start_address || form.origin,
-        endAddress: legs[legs.length - 1]?.end_address || form.destination,
-        stops: [
-          legs[0]?.start_address || form.origin,
-          ...legs.map((leg) => leg.end_address)
-        ].filter(Boolean),
-        legs: legs.map((leg, index) => ({
-          segmentNo: index + 1,
-          startAddress: leg.start_address,
-          endAddress: leg.end_address,
-          distance: leg.distance?.text || '',
-          duration: leg.duration?.text || '',
-          steps: leg.steps?.map((step) => ({
-            instruction: step.instructions,
-            distance: step.distance?.text || '',
-            duration: step.duration?.text || ''
-          })) || []
-        }))
-      });
+      setRouteResult(preview);
     } catch (error) {
-      setMapError(error.message || 'Không thể tính toán lộ trình.');
+      setMapError(error.message || getGoogleMapsRouteErrorMessage(error));
       setRouteResult(null);
     } finally {
       setRouteLoading(false);
@@ -391,9 +886,116 @@ function RouteMapPage({ orders }) {
       travelMode: 'DRIVING',
       waypoints: []
     });
+    setSelectedLocations({ origin: null, destination: null });
     setRouteResult(null);
     setMapError('');
   }
+
+  function handleAddressInputChange(field, value) {
+    setForm((prev) => ({ ...prev, [field]: value }));
+    setSelectedLocations((prev) => ({ ...prev, [field]: null }));
+    setAddressSuggestions((prev) => ({ ...prev, [field]: [] }));
+  }
+
+  function selectSuggestion(field, suggestion) {
+    setForm((prev) => ({ ...prev, [field]: suggestion.label }));
+    setSelectedLocations((prev) => ({ ...prev, [field]: suggestion }));
+    setAddressSuggestions((prev) => ({ ...prev, [field]: [] }));
+    setActiveSuggestionField('');
+  }
+
+  useEffect(() => {
+    if (!mapboxAccessToken || !routeResult?.stops?.length || !mapContainerRef.current) {
+      return;
+    }
+
+    mapboxgl.accessToken = mapboxAccessToken;
+
+    try {
+      const map =
+        mapInstanceRef.current ||
+        new mapboxgl.Map({
+          container: mapContainerRef.current,
+          style: 'mapbox://styles/mapbox/streets-v12',
+          center: [routeResult.stops[0].coordinate.lng, routeResult.stops[0].coordinate.lat],
+          zoom: 6
+        });
+
+      mapInstanceRef.current = map;
+
+      const renderRoute = () => {
+        setMapRenderError('');
+
+        markerRefs.current.forEach((marker) => marker.remove());
+        markerRefs.current = [];
+
+        const sourceId = 'route-preview-source';
+        const layerId = 'route-preview-layer';
+        const geojson = {
+          type: 'Feature',
+          geometry: {
+            type: 'LineString',
+            coordinates: (routeResult.path || []).map((point) => [point.lng, point.lat])
+          }
+        };
+
+        if (map.getLayer(layerId)) {
+          map.removeLayer(layerId);
+        }
+        if (map.getSource(sourceId)) {
+          map.removeSource(sourceId);
+        }
+
+        if (geojson.geometry.coordinates.length > 1) {
+          map.addSource(sourceId, { type: 'geojson', data: geojson });
+          map.addLayer({
+            id: layerId,
+            type: 'line',
+            source: sourceId,
+            layout: {
+              'line-cap': 'round',
+              'line-join': 'round'
+            },
+            paint: {
+              'line-color': '#2563eb',
+              'line-width': 5,
+              'line-opacity': 0.9
+            }
+          });
+        }
+
+        routeResult.stops.forEach((stop, index) => {
+          const markerElement = document.createElement('div');
+          markerElement.className = 'route-map-marker';
+          markerElement.textContent = String(index + 1);
+          const marker = new mapboxgl.Marker({ element: markerElement })
+            .setLngLat([stop.coordinate.lng, stop.coordinate.lat])
+            .setPopup(new mapboxgl.Popup({ offset: 18 }).setText(stop.address))
+            .addTo(map);
+          markerRefs.current.push(marker);
+        });
+
+        const bounds = new mapboxgl.LngLatBounds();
+        routeResult.stops.forEach((stop) => bounds.extend([stop.coordinate.lng, stop.coordinate.lat]));
+        map.fitBounds(bounds, { padding: 60, maxZoom: 11 });
+      };
+
+      if (map.isStyleLoaded()) {
+        renderRoute();
+      } else {
+        map.once('load', renderRoute);
+      }
+    } catch (error) {
+      setMapRenderError(error.message || 'Không thể hiển thị Mapbox. Đã chuyển sang sơ đồ tuyến nội bộ.');
+    }
+  }, [routeResult, mapboxAccessToken]);
+
+  useEffect(() => () => {
+    markerRefs.current.forEach((marker) => marker.remove());
+    markerRefs.current = [];
+    mapInstanceRef.current?.remove();
+    mapInstanceRef.current = null;
+  }, []);
 
   return (
     <section className="stack">
@@ -403,15 +1005,6 @@ function RouteMapPage({ orders }) {
           <h2>Công cụ tính toán lộ trình tối ưu</h2>
         </div>
       </div>
-
-      {!googleMapsApiKey ? (
-        <div className="panel">
-          <h3>Thiếu API key Google Maps</h3>
-          <p className="muted">
-            Thêm biến môi trường <code>VITE_GOOGLE_MAPS_API_KEY</code> vào file <code>frontend/.env</code> rồi chạy lại frontend.
-          </p>
-        </div>
-      ) : null}
 
       <div className="route-grid">
         <div className="panel stack">
@@ -426,20 +1019,54 @@ function RouteMapPage({ orders }) {
           <form className="stack" onSubmit={handleCalculateRoute}>
             <label>
               Điểm đi
-              <input
-                value={form.origin}
-                onChange={(event) => setForm((prev) => ({ ...prev, origin: event.target.value }))}
-                placeholder="Ví dụ: TP. Hồ Chí Minh"
-              />
+              <div className="address-autocomplete">
+                <input
+                  value={form.origin}
+                  onFocus={() => setActiveSuggestionField('origin')}
+                  onChange={(event) => handleAddressInputChange('origin', event.target.value)}
+                  placeholder="Ví dụ: TP. Hồ Chí Minh"
+                />
+                {activeSuggestionField === 'origin' && addressSuggestions.origin.length ? (
+                  <div className="address-suggestion-list">
+                    {addressSuggestions.origin.map((suggestion) => (
+                      <button
+                        key={suggestion.id}
+                        type="button"
+                        className="address-suggestion-item"
+                        onClick={() => selectSuggestion('origin', suggestion)}
+                      >
+                        {suggestion.label}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
             </label>
 
             <label>
               Điểm đến
-              <input
-                value={form.destination}
-                onChange={(event) => setForm((prev) => ({ ...prev, destination: event.target.value }))}
-                placeholder="Ví dụ: Hà Nội"
-              />
+              <div className="address-autocomplete">
+                <input
+                  value={form.destination}
+                  onFocus={() => setActiveSuggestionField('destination')}
+                  onChange={(event) => handleAddressInputChange('destination', event.target.value)}
+                  placeholder="Ví dụ: Hà Nội"
+                />
+                {activeSuggestionField === 'destination' && addressSuggestions.destination.length ? (
+                  <div className="address-suggestion-list">
+                    {addressSuggestions.destination.map((suggestion) => (
+                      <button
+                        key={suggestion.id}
+                        type="button"
+                        className="address-suggestion-item"
+                        onClick={() => selectSuggestion('destination', suggestion)}
+                      >
+                        {suggestion.label}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
             </label>
 
             <label>
@@ -455,7 +1082,7 @@ function RouteMapPage({ orders }) {
               </select>
             </label>
 
-            <button className="primary-button" disabled={routeLoading || !googleMapsApiKey}>
+            <button className="primary-button" disabled={routeLoading}>
               {routeLoading ? 'Đang tính toán...' : 'Tính lộ trình'}
             </button>
           </form>
@@ -475,12 +1102,64 @@ function RouteMapPage({ orders }) {
 
         <div className="stack">
           <div className="panel route-map-panel">
-            <div ref={mapRef} className="route-map-canvas" />
+            {routeResult && routeResult.stops?.length && mapboxAccessToken && !mapRenderError ? (
+              <div className="route-map-shell">
+                <div className="route-map-overlay">
+                  <strong>{routeResult.distanceText}</strong>
+                  <span>{routeResult.durationText}</span>
+                </div>
+                <div ref={mapContainerRef} className="route-map-canvas" />
+              </div>
+            ) : routeResult && previewPoints.length ? (
+              <div className="route-map-shell route-map-fallback">
+                <div className="route-map-overlay">
+                  <strong>{routeResult.distanceText}</strong>
+                  <span>{routeResult.durationText}</span>
+                </div>
+                <svg className="route-map-canvas" viewBox="0 0 700 360" preserveAspectRatio="xMidYMid meet">
+                  <defs>
+                    <linearGradient id="routePreviewStroke" x1="0%" y1="0%" x2="100%" y2="100%">
+                      <stop offset="0%" stopColor="#2563eb" />
+                      <stop offset="100%" stopColor="#f97316" />
+                    </linearGradient>
+                  </defs>
+                  <path
+                    d={buildSmoothPath(previewPoints)}
+                    fill="none"
+                    stroke="url(#routePreviewStroke)"
+                    strokeWidth="8"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                  {previewPoints.map((point, index) => (
+                    <g key={`${point.address}-${index}`} transform={`translate(${point.x}, ${point.y})`}>
+                      <circle r="20" fill={index === 0 ? '#2563eb' : index === previewPoints.length - 1 ? '#f97316' : '#0f172a'} />
+                      <circle r="24" fill="none" stroke="rgba(37,99,235,0.16)" strokeWidth="10" />
+                      <text textAnchor="middle" dominantBaseline="central" fill="#fff" fontSize="14" fontWeight="700">
+                        {index + 1}
+                      </text>
+                    </g>
+                  ))}
+                </svg>
+                <div className="route-map-fallback-stops">
+                  {previewPoints.map((point, index) => (
+                    <div key={`${point.address}-legend-${index}`} className="route-stop-chip">
+                      {index + 1}. {point.address}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div className="route-map-canvas route-map-empty">
+                <p className="muted">Nhập tuyến đường rồi bấm "Tính lộ trình" để xem hành trình.</p>
+              </div>
+            )}
           </div>
 
           <div className="panel stack">
             <h3>Kết quả lộ trình</h3>
             {mapError ? <p className="error-text">{mapError}</p> : null}
+            {mapRenderError ? <p className="error-text">{mapRenderError}</p> : null}
             {routeResult ? (
               <>
                 <div className="route-summary-grid">
@@ -494,8 +1173,8 @@ function RouteMapPage({ orders }) {
                 {routeResult.stops?.length ? (
                   <div className="route-stops-list">
                     {routeResult.stops.map((stop, index) => (
-                      <div key={`${stop}-${index}`} className="route-stop-chip">
-                        Chặng {index + 1}: {stop}
+                      <div key={`${stop.address}-${index}`} className="route-stop-chip">
+                        Chặng {index + 1}: {stop.address}
                       </div>
                     ))}
                   </div>
@@ -504,25 +1183,14 @@ function RouteMapPage({ orders }) {
                   {routeResult.legs.map((leg) => (
                     <div key={`${leg.segmentNo}-${leg.startAddress}`} className="panel route-leg-panel">
                       <h4>Chặng {leg.segmentNo}</h4>
-                      <p className="muted">{leg.startAddress} -> {leg.endAddress}</p>
-                      <p className="muted">{leg.distance} | {leg.duration}</p>
-                      <div className="route-steps">
-                        {leg.steps.map((step, index) => (
-                          <div key={`${leg.segmentNo}-${index}`} className="route-step">
-                            <div className="route-step-index">{index + 1}</div>
-                            <div>
-                              <p dangerouslySetInnerHTML={{ __html: step.instruction }} />
-                              <small>{step.distance} {step.duration ? `| ${step.duration}` : ''}</small>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
+                      <p className="muted">{leg.startAddress} {'->'} {leg.endAddress}</p>
+                      <p className="muted">{leg.distanceText} | {leg.durationText}</p>
                     </div>
                   ))}
                 </div>
               </>
             ) : (
-              <p className="muted">Nhập tuyến đường rồi bấm "Tính lộ trình" để xem bản đồ và thời gian dự kiến.</p>
+              <p className="muted">Nhập tuyến đường rồi bấm "Tính lộ trình" để xem bản đồ và thời gian dự kiến từ backend geocode.</p>
             )}
           </div>
         </div>
@@ -1374,7 +2042,13 @@ function DispatchCard({ trip, availableOrders, onAssignOrders, refresh }) {
   );
 }
 
-function TripsPage({ trips, auth, onTripStatus }) {
+function TripsPage({ trips, auth, onTripStatus, refresh }) {
+  useEffect(() => {
+    refresh('trips').catch((error) => {
+      console.error(error);
+    });
+  }, [refresh]);
+
   return (
     <section className="stack">
       <div className="page-header">
@@ -1383,6 +2057,7 @@ function TripsPage({ trips, auth, onTripStatus }) {
           <h2>{auth.user.role === 'DRIVER' ? 'Chuyến được giao' : 'Danh sách chuyến hàng'}</h2>
         </div>
       </div>
+      {!trips.length ? <p className="muted">Chưa có chuyến hàng nào hoặc dữ liệu đang được tải lại.</p> : null}
       <div className={auth.user.role === 'DRIVER' ? 'driver-trip-grid' : 'stack'}>
         {trips.map((trip) => (
           <div key={trip.id} className="panel trip-card">
@@ -1440,7 +2115,16 @@ function statusColor(status) {
 }
 
 function defaultTruckForm() {
-  return { license_plate: '', truck_type: '', capacity_tons: '', status: 'AVAILABLE' };
+  return {
+    license_plate: '',
+    truck_type: '',
+    capacity_tons: '',
+    status: 'AVAILABLE',
+    cumulative_km: '',
+    maintenance_interval_km: '10000',
+    last_maintenance_km: '0',
+    last_maintenance_date: ''
+  };
 }
 
 function defaultDriverForm() {
@@ -1548,8 +2232,16 @@ export default function App() {
     setLoginError('');
     try {
       const data = await login(credentials.username, credentials.password);
-      setAuth(data);
-      navigate(data.user.role === 'DRIVER' ? '/driver/trips' : '/');
+      const normalizedAuth = {
+        ...data,
+        user: {
+          ...data.user,
+          role: data.user.role || roleById[data.user.role_id] || 'DISPATCHER',
+          fullName: data.user.fullName || data.user.full_name || data.user.username
+        }
+      };
+      setAuth(normalizedAuth);
+      navigate(normalizedAuth.user.role === 'DRIVER' ? '/driver/trips' : '/');
     } catch (error) {
       setLoginError(error.message);
     } finally {
@@ -1624,6 +2316,7 @@ export default function App() {
         {role !== 'DRIVER' ? (
           <>
             <Route path="/" element={<DashboardPage summary={summary} />} />
+            <Route path="/forecasting" element={<ForecastingPage token={token} trucks={trucks} refreshTrucks={loadAll} />} />
             {role === 'ADMIN' ? (
               <>
                 <Route
@@ -1672,7 +2365,11 @@ export default function App() {
                     { name: 'license_plate', label: 'Biển số' },
                     { name: 'truck_type', label: 'Loại xe' },
                     { name: 'capacity_tons', label: 'Tải trọng', type: 'number' },
-                    { name: 'status', label: 'Trạng thái', type: 'select', options: ['AVAILABLE', 'IN_USE', 'MAINTENANCE'] }
+                    { name: 'status', label: 'Trạng thái', type: 'select', options: ['AVAILABLE', 'IN_USE', 'MAINTENANCE'] },
+                    { name: 'cumulative_km', label: 'Km tích lũy', type: 'number' },
+                    { name: 'maintenance_interval_km', label: 'Chu kỳ bảo trì (km)', type: 'number' },
+                    { name: 'last_maintenance_km', label: 'Mốc bảo trì gần nhất', type: 'number' },
+                    { name: 'last_maintenance_date', label: 'Ngày bảo trì gần nhất', type: 'date' }
                   ]}
                   rows={trucks}
                   form={truckForm}
@@ -1728,7 +2425,7 @@ export default function App() {
             ) : null}
             {role === 'DISPATCHER' ? (
               <>
-            <Route path="/route-map" element={<RouteMapPage orders={orders} />} />
+            <Route path="/route-map" element={<RouteMapPage orders={orders} token={token} />} />
             <Route path="/optimizer" element={<OptimizerPage orders={orders} trucks={trucks} token={token} />} />
             <Route path="/optimizer-history" element={<OptimizerHistoryPage token={token} />} />
             <Route
@@ -1760,7 +2457,7 @@ export default function App() {
                 />
               }
             />
-            <Route path="/trips" element={<TripsPage trips={trips} auth={auth} onTripStatus={updateTripStatus} />} />
+            <Route path="/trips" element={<TripsPage trips={trips} auth={auth} onTripStatus={updateTripStatus} refresh={loadAll} />} />
               </>
             ) : null}
           </>

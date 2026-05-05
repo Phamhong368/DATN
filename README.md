@@ -13,6 +13,13 @@ npm install
 python3 -m pip install -r backend/optimizer/requirements.txt
 ```
 
+Copy file mau cau hinh:
+
+```bash
+cp backend/.env.example backend/.env
+cp frontend/.env.example frontend/.env
+```
+
 ## 2. Tao database trong XAMPP
 
 1. Mo XAMPP va start `MySQL`
@@ -84,7 +91,17 @@ DB_USER=root
 DB_PASSWORD=tms_root_123
 ```
 
-`docker-compose` se tu dong import file `database/tms_demo_full.sql` vao MySQL container o lan khoi dong dau tien.
+`docker-compose` se tu dong import lan luot:
+
+- `database/schema.sql`
+- `database/seed.sql`
+
+Neu muon reset lai du lieu Docker tu dau:
+
+```bash
+docker compose down -v
+docker compose up --build
+```
 
 ## 5. Bat ban do Google Maps
 
@@ -125,3 +142,9 @@ Ket qua tra ve:
 - Admin: `admin` / `password123`
 - Dispatcher: `dispatcher` / `password123`
 - Driver: `driver1` / `password123`
+
+## Checklist ky thuat
+
+Bang tong hop tinh trang ky thuat va huong xu ly nam tai:
+
+- [docs/technical-checklist.md](/Users/phamhong/Documents/DATN/docs/technical-checklist.md)

@@ -1,32 +1,61 @@
 import mysql from 'mysql2/promise';
 import dotenv from 'dotenv';
-import path from 'path';
-import { fileURLToPath } from 'url';
+dotenv.config();
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const {
+  DB_HOST = '127.0.0.1',
+  DB_USER = 'root',
+  DB_PASSWORD = '',
+  DB_NAME = 'datn',
+  DB_PORT = '3306',
+  DB_RETRY_COUNT = '5',
+  DB_RETRY_DELAY = '2000',
+} = process.env;
 
-dotenv.config({
-  path: path.resolve(__dirname, '../../.env')
-});
+let pool = null;
 
-const pool = mysql.createPool({
-  host: process.env.DB_HOST || '127.0.0.1',
-  port: Number(process.env.DB_PORT || 3306),
-  database: process.env.DB_NAME || 'tms_xampp',
-  user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || '',
-  waitForConnections: true,
-  connectionLimit: 10
-});
+function wait(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+export async function connectDB(retries = Number(DB_RETRY_COUNT)) {
+  let lastErr = null;
+  for (let i = 0; i <= retries; i++) {
+    try {
+      pool = mysql.createPool({
+        host: DB_HOST,
+        user: DB_USER,
+        password: DB_PASSWORD,
+        database: DB_NAME,
+        port: Number(DB_PORT),
+        waitForConnections: true,
+        connectionLimit: 10,
+      });
+      await pool.query('SELECT 1');
+      console.log('Database connected.');
+      return pool;
+    } catch (err) {
+      lastErr = err;
+      console.error(`Database connection attempt ${i + 1} failed: ${err.message}`);
+      if (i < retries) await wait(Number(DB_RETRY_DELAY));
+    }
+  }
+  throw new Error(`Unable to connect to DB: ${lastErr?.message || lastErr}`);
+}
+
+export function getPool() {
+  if (!pool) throw new Error('Database not connected. Call connectDB() first.');
+  return pool;
+}
 
 export async function query(sql, params = []) {
-  const [rows] = await pool.execute(sql, params);
+  const p = getPool();
+  const [rows] = await p.execute(sql, params);
   return rows;
 }
 
 export async function withTransaction(fn) {
-  const connection = await pool.getConnection();
+  const connection = await getPool().getConnection();
   try {
     await connection.beginTransaction();
     const result = await fn(connection);
@@ -41,7 +70,15 @@ export async function withTransaction(fn) {
 }
 
 export async function testConnection() {
-  await pool.query('SELECT 1');
+  const p = getPool();
+  await p.query('SELECT 1');
 }
 
-export { pool };
+// default export optional
+export default {
+  connectDB,
+  getPool,
+  query,
+  withTransaction,
+  testConnection,
+};

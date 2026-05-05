@@ -1,28 +1,21 @@
+import dotenv from 'dotenv';
 import app from './app.js';
-import { testConnection } from './config/db.js';
+import { connectDB } from './config/db.js';
 
-const port = Number(process.env.PORT || 4001);
+dotenv.config();
 
-async function bootstrap() {
+const PORT = Number(process.env.PORT || 4000);
+
+async function start() {
   try {
-    await testConnection();
-    console.log('Database connected.');
-  } catch (error) {
-    console.warn('Database connection failed on startup:', error.message);
+    await connectDB();
+    app.listen(PORT, () => {
+      console.log(`Backend listening on http://localhost:${PORT}`);
+    });
+  } catch (err) {
+    console.error('Failed to start server due to DB error:', err?.message || err);
+    process.exit(1);
   }
-
-  const server = app.listen(port, () => {
-    console.log(`Backend listening on http://localhost:${port}`);
-  });
-
-  server.on('error', (err) => {
-    console.error('Server error:', err.message);
-    if (err.code === 'EADDRINUSE') {
-      console.error(`Port ${port} is already in use. Set PORT env or free the port and restart.`);
-      process.exit(1);
-    }
-  });
 }
 
-bootstrap();
-
+start();

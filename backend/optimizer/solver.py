@@ -48,6 +48,22 @@ def resolve_coordinate(location):
     return None
 
 
+def get_coordinate(data, fallback_location=None):
+    coordinate = data.get("coordinate")
+    if isinstance(coordinate, dict):
+        lat = coordinate.get("lat")
+        lng = coordinate.get("lng")
+        if lat is not None and lng is not None:
+            return {"lat": float(lat), "lng": float(lng)}
+
+    latitude = data.get("latitude")
+    longitude = data.get("longitude")
+    if latitude is not None and longitude is not None:
+        return {"lat": float(latitude), "lng": float(longitude)}
+
+    return resolve_coordinate(fallback_location)
+
+
 def haversine_distance_km(origin, destination):
     radius_km = 6371
     lat_delta = math.radians(destination["lat"] - origin["lat"])
@@ -90,7 +106,7 @@ def format_clock(total_minutes):
 
 def build_nodes(payload):
     depot_location = payload.get("depot", {}).get("location") or payload.get("depot", {}).get("name")
-    depot_coordinate = resolve_coordinate(depot_location)
+    depot_coordinate = get_coordinate(payload.get("depot", {}), depot_location)
     if not depot_coordinate:
         raise ValueError("Không xác định được tọa độ kho xuất phát.")
 
@@ -107,9 +123,10 @@ def build_nodes(payload):
     orders = []
     invalid_orders = []
     for order in payload.get("orders", []):
-        coordinate = resolve_coordinate(order.get("delivery_location") or order.get("location"))
+        location = order.get("delivery_location") or order.get("location")
+        coordinate = get_coordinate(order, location)
         if not coordinate:
-            invalid_orders.append(order.get("delivery_location") or order.get("order_code"))
+            invalid_orders.append(location or order.get("order_code"))
             continue
         orders.append(
             {

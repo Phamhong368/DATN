@@ -2,8 +2,24 @@ import express from 'express';
 import { query, withTransaction } from '../config/db.js';
 import { asyncHandler } from '../utils/http.js';
 import { optimizeRoutesWithOrTools } from '../utils/optimizerService.js';
+import { attachCoordinatesToOptimizationInput, resolveAddressCoordinate } from '../utils/geocoding.js';
+import { buildRoutePreview } from '../utils/routePreview.js';
 
 const router = express.Router();
+
+function getStopAddress(stop) {
+  if (!stop) {
+    return '';
+  }
+  return typeof stop === 'string' ? stop : stop.address || '';
+}
+
+async function resolveStopCoordinate(stop) {
+  if (stop?.coordinate?.lat && stop?.coordinate?.lng) {
+    return stop.coordinate;
+  }
+  return resolveAddressCoordinate(getStopAddress(stop));
+}
 
 function generateOptimizationCode() {
   return `OPT-${Date.now()}`;
@@ -19,21 +35,39 @@ async function findOrCreateDepot(connection, depot) {
   );
 
   if (existingRows.length) {
+    const existingDepot = existingRows[0];
+    if (depot.coordinate && (!existingDepot.latitude || !existingDepot.longitude)) {
+      await connection.execute(
+        `UPDATE depots
+         SET latitude = ?, longitude = ?
+         WHERE id = ?`,
+        [depot.coordinate.lat, depot.coordinate.lng, existingDepot.id]
+      );
+
+      return {
+        ...existingDepot,
+        latitude: depot.coordinate.lat,
+        longitude: depot.coordinate.lng
+      };
+    }
+
     return existingRows[0];
   }
 
   const code = `DPT-AUTO-${Date.now()}`;
   const [result] = await connection.execute(
-    `INSERT INTO depots (depot_code, name, location, status)
-     VALUES (?, ?, ?, 'ACTIVE')`,
-    [code, depot.name || depot.location, depot.location]
+    `INSERT INTO depots (depot_code, name, location, latitude, longitude, status)
+     VALUES (?, ?, ?, ?, ?, 'ACTIVE')`,
+    [code, depot.name || depot.location, depot.location, depot.coordinate?.lat ?? null, depot.coordinate?.lng ?? null]
   );
 
   return {
     id: result.insertId,
     depot_code: code,
     name: depot.name || depot.location,
-    location: depot.location
+    location: depot.location,
+    latitude: depot.coordinate?.lat ?? null,
+    longitude: depot.coordinate?.lng ?? null
   };
 }
 
@@ -186,10 +220,15 @@ router.post(
       return res.status(400).json({ message: 'Danh sách xe không hợp lệ.' });
     }
 
-    const result = await optimizeRoutesWithOrTools({ depot, trucks, orders });
+    const enrichedInput = await attachCoordinatesToOptimizationInput({ depot, orders });
+    const result = await optimizeRoutesWithOrTools({
+      depot: enrichedInput.depot,
+      trucks,
+      orders: enrichedInput.orders
+    });
     const saved = await persistOptimization({
       result,
-      depot,
+      depot: enrichedInput.depot,
       orders,
       createdBy: req.user.id
     });
@@ -198,6 +237,43 @@ router.post(
       ...result,
       saved
     });
+  })
+);
+
+router.post(
+  '/route-preview',
+  asyncHandler(async (req, res) => {
+    const {
+      origin,
+      destination,
+      waypoints = [],
+      travelMode = 'DRIVING'
+    } = req.body;
+
+    if (!origin || !destination) {
+      return res.status(400).json({ message: 'Cần nhập điểm đi và điểm đến.' });
+    }
+
+    const allStops = [origin, ...waypoints, destination].filter(Boolean);
+    const coordinates = await Promise.all(allStops.map((stop) => resolveStopCoordinate(stop)));
+
+    const preview = await buildRoutePreview({
+      origin: {
+        address: getStopAddress(origin),
+        coordinate: coordinates[0]
+      },
+      destination: {
+        address: getStopAddress(destination),
+        coordinate: coordinates[coordinates.length - 1]
+      },
+      waypoints: waypoints.map((stop, index) => ({
+        address: getStopAddress(stop),
+        coordinate: coordinates[index + 1]
+      })),
+      travelMode
+    });
+
+    res.json(preview);
   })
 );
 

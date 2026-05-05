@@ -20,6 +20,10 @@ CREATE TABLE IF NOT EXISTS trucks (
   truck_type VARCHAR(100) NOT NULL,
   capacity_tons DECIMAL(10,2) NOT NULL,
   status ENUM('AVAILABLE', 'IN_USE', 'MAINTENANCE') NOT NULL DEFAULT 'AVAILABLE',
+  cumulative_km DECIMAL(12,2) NOT NULL DEFAULT 0,
+  maintenance_interval_km DECIMAL(12,2) NOT NULL DEFAULT 10000,
+  last_maintenance_km DECIMAL(12,2) NOT NULL DEFAULT 0,
+  last_maintenance_date DATE NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
@@ -176,4 +180,22 @@ CREATE TABLE IF NOT EXISTS route_optimization_stops (
   CONSTRAINT fk_route_opt_stops_route FOREIGN KEY (optimization_route_id) REFERENCES route_optimization_routes(id) ON DELETE CASCADE,
   CONSTRAINT fk_route_opt_stops_order FOREIGN KEY (order_id) REFERENCES orders(id),
   CONSTRAINT uq_route_opt_stop UNIQUE (optimization_route_id, stop_sequence)
+);
+
+CREATE TABLE IF NOT EXISTS fuel_logs (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  truck_id INT NOT NULL,
+  trip_id INT NULL,
+  log_date DATE NOT NULL,
+  distance_km DECIMAL(12,2) NOT NULL,
+  fuel_liters DECIMAL(12,2) NOT NULL,
+  payload_tons DECIMAL(10,2) NOT NULL DEFAULT 0,
+  idle_minutes INT NOT NULL DEFAULT 0,
+  avg_speed_kmh DECIMAL(10,2) NOT NULL DEFAULT 45,
+  cumulative_km_after DECIMAL(12,2) NOT NULL,
+  notes TEXT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_fuel_logs_truck FOREIGN KEY (truck_id) REFERENCES trucks(id) ON DELETE CASCADE,
+  CONSTRAINT fk_fuel_logs_trip FOREIGN KEY (trip_id) REFERENCES trips(id) ON DELETE SET NULL
 );

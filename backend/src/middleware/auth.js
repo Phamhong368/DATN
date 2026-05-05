@@ -6,6 +6,12 @@ const rolePriority = {
   ADMIN: 3
 };
 
+const roleById = {
+  1: 'ADMIN',
+  2: 'DISPATCHER',
+  3: 'DRIVER'
+};
+
 export function authenticate(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader?.startsWith('Bearer ')) {
@@ -15,7 +21,11 @@ export function authenticate(req, res, next) {
   const token = authHeader.slice(7);
 
   try {
-    req.user = jwt.verify(token, process.env.JWT_SECRET || 'super-secret-demo-key');
+    const payload = jwt.verify(token, process.env.JWT_SECRET || 'super-secret-demo-key');
+    req.user = {
+      ...payload,
+      role: payload.role || roleById[payload.role_id]
+    };
     next();
   } catch {
     res.status(401).json({ message: 'Invalid or expired token.' });
@@ -31,4 +41,3 @@ export function authorize(minRole) {
     next();
   };
 }
-
