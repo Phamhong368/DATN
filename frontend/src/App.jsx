@@ -13,7 +13,7 @@ import {
   XAxis,
   YAxis
 } from 'recharts';
-import { apiRequest, login } from './api.js';
+import { apiRequest, downloadApiFile, login } from './api.js';
 
 const navItems = [
   { key: 'dashboard', label: 'Bảng điều khiển', path: '/', roles: ['ADMIN', 'DISPATCHER'] },
@@ -28,6 +28,8 @@ const navItems = [
   { key: 'optimizer', label: 'Tối ưu lộ trình', path: '/optimizer', roles: ['DISPATCHER'] },
   { key: 'optimizer-history', label: 'Lịch sử tối ưu', path: '/optimizer-history', roles: ['DISPATCHER'] },
   { key: 'route-map', label: 'Bản đồ lộ trình', path: '/route-map', roles: ['DISPATCHER'] },
+  { key: 'tracking', label: 'GPS realtime', path: '/tracking', roles: ['DISPATCHER'] },
+  { key: 'reports', label: 'Báo cáo', path: '/reports', roles: ['ADMIN', 'DISPATCHER'] },
   { key: 'forecasting', label: 'Dự báo nhiên liệu', path: '/forecasting', roles: ['ADMIN', 'DISPATCHER'] }
 ];
 
@@ -273,7 +275,7 @@ function Layout({ auth, onLogout, children }) {
   );
 }
 
-function LoginPage({ onLogin, loading, error }) {
+export function LoginPage({ onLogin, loading, error }) {
   const [form, setForm] = useState({ username: 'dispatcher', password: 'password123' });
 
   return (
@@ -359,6 +361,62 @@ function DashboardPage({ summary }) {
             </PieChart>
           </ResponsiveContainer>
         </div>
+      </div>
+    </section>
+  );
+}
+
+function ReportExportsPage({ token }) {
+  const [error, setError] = useState('');
+  const [downloading, setDownloading] = useState('');
+  const reports = [
+    { key: 'orders', label: 'Đơn hàng' },
+    { key: 'trips', label: 'Chuyến hàng' },
+    { key: 'fuel', label: 'Nhiên liệu' },
+    { key: 'maintenance', label: 'Bảo trì' }
+  ];
+
+  async function handleDownload(report, format) {
+    setError('');
+    setDownloading(`${report}-${format}`);
+    try {
+      await downloadApiFile(`/reports/export?report=${report}&format=${format}`, {
+        token,
+        filename: `${report}-report.${format === 'pdf' ? 'pdf' : 'xls'}`
+      });
+    } catch (downloadError) {
+      setError(downloadError.message);
+    } finally {
+      setDownloading('');
+    }
+  }
+
+  return (
+    <section className="stack">
+      <div className="page-header">
+        <div>
+          <p className="eyebrow">Báo cáo</p>
+          <h2>Xuất Excel/PDF vận hành</h2>
+        </div>
+      </div>
+      {error ? <p className="error-text">{error}</p> : null}
+      <div className="cards-grid">
+        {reports.map((report) => (
+          <div key={report.key} className="panel stack">
+            <div>
+              <h3>Báo cáo {report.label}</h3>
+              <p className="muted">Xuất dữ liệu hiện có trong hệ thống để nộp minh chứng hoặc gửi điều hành.</p>
+            </div>
+            <div className="action-row">
+              <button className="primary-button" onClick={() => handleDownload(report.key, 'xlsx')} disabled={Boolean(downloading)}>
+                {downloading === `${report.key}-xlsx` ? 'Đang xuất...' : 'Tải Excel'}
+              </button>
+              <button className="inline-button" onClick={() => handleDownload(report.key, 'pdf')} disabled={Boolean(downloading)}>
+                {downloading === `${report.key}-pdf` ? 'Đang xuất...' : 'Tải PDF'}
+              </button>
+            </div>
+          </div>
+        ))}
       </div>
     </section>
   );
@@ -647,7 +705,18 @@ function ForecastingPage({ token, trucks, refreshTrucks }) {
               <div className="route-summary-grid">
                 <StatCard label="R²" value={formatNumber(trainingResult.model.metrics.r2, 4)} />
                 <StatCard label="MAE" value={`${formatNumber(trainingResult.model.metrics.mae, 3)} L`} />
+                <StatCard label="RMSE" value={`${formatNumber(trainingResult.model.metrics.rmse, 3)} L`} />
+                <StatCard label="MAPE" value={`${formatNumber(trainingResult.model.metrics.mape, 2)}%`} />
               </div>
+              {trainingResult.model.metrics.test ? (
+                <div className="route-summary-grid">
+                  <StatCard label="Test MAE" value={`${formatNumber(trainingResult.model.metrics.test.mae, 3)} L`} />
+                  <StatCard label="Test RMSE" value={`${formatNumber(trainingResult.model.metrics.test.rmse, 3)} L`} />
+                  <StatCard label="Test MAPE" value={`${formatNumber(trainingResult.model.metrics.test.mape, 2)}%`} />
+                  <StatCard label="Mẫu test" value={trainingResult.model.metrics.test.sampleSize} />
+                </div>
+              ) : null}
+              <p className="muted">{trainingResult.model.evaluationNote || trainingResult.evaluationNote}</p>
               <div className="table-wrap">
                 <table>
                   <thead>
@@ -799,6 +868,8 @@ function RouteMapPage({ orders, token }) {
   const [addressSuggestions, setAddressSuggestions] = useState({ origin: [], destination: [] });
   const [activeSuggestionField, setActiveSuggestionField] = useState('');
   const [selectedLocations, setSelectedLocations] = useState({ origin: null, destination: null });
+  const [mapPickTarget, setMapPickTarget] = useState('destination');
+  const [reverseLoading, setReverseLoading] = useState(false);
   const previewPoints = useMemo(() => buildRoutePreviewPoints(routeResult?.stops || []), [routeResult]);
 
   useEffect(() => {
@@ -852,6 +923,7 @@ function RouteMapPage({ orders, token }) {
   async function handleCalculateRoute(event) {
     event.preventDefault();
     setMapError('');
+    setActiveSuggestionField('');
     setRouteLoading(true);
 
     try {
@@ -904,8 +976,26 @@ function RouteMapPage({ orders, token }) {
     setActiveSuggestionField('');
   }
 
+  function updateWaypoint(index, value) {
+    setForm((prev) => ({
+      ...prev,
+      waypoints: prev.waypoints.map((waypoint, waypointIndex) => (waypointIndex === index ? value : waypoint))
+    }));
+  }
+
+  function addWaypoint() {
+    setForm((prev) => ({ ...prev, waypoints: [...prev.waypoints, ''] }));
+  }
+
+  function removeWaypoint(index) {
+    setForm((prev) => ({
+      ...prev,
+      waypoints: prev.waypoints.filter((_, waypointIndex) => waypointIndex !== index)
+    }));
+  }
+
   useEffect(() => {
-    if (!mapboxAccessToken || !routeResult?.stops?.length || !mapContainerRef.current) {
+    if (!mapboxAccessToken || !mapContainerRef.current) {
       return;
     }
 
@@ -917,8 +1007,8 @@ function RouteMapPage({ orders, token }) {
         new mapboxgl.Map({
           container: mapContainerRef.current,
           style: 'mapbox://styles/mapbox/streets-v12',
-          center: [routeResult.stops[0].coordinate.lng, routeResult.stops[0].coordinate.lat],
-          zoom: 6
+          center: [106.7009, 16.0544],
+          zoom: 5
         });
 
       mapInstanceRef.current = map;
@@ -931,13 +1021,6 @@ function RouteMapPage({ orders, token }) {
 
         const sourceId = 'route-preview-source';
         const layerId = 'route-preview-layer';
-        const geojson = {
-          type: 'Feature',
-          geometry: {
-            type: 'LineString',
-            coordinates: (routeResult.path || []).map((point) => [point.lng, point.lat])
-          }
-        };
 
         if (map.getLayer(layerId)) {
           map.removeLayer(layerId);
@@ -945,6 +1028,20 @@ function RouteMapPage({ orders, token }) {
         if (map.getSource(sourceId)) {
           map.removeSource(sourceId);
         }
+
+        if (!routeResult?.stops?.length) {
+          map.setCenter([106.7009, 16.0544]);
+          map.setZoom(5);
+          return;
+        }
+
+        const geojson = {
+          type: 'Feature',
+          geometry: {
+            type: 'LineString',
+            coordinates: (routeResult.path || []).map((point) => [point.lng, point.lat])
+          }
+        };
 
         if (geojson.geometry.coordinates.length > 1) {
           map.addSource(sourceId, { type: 'geojson', data: geojson });
@@ -990,6 +1087,45 @@ function RouteMapPage({ orders, token }) {
     }
   }, [routeResult, mapboxAccessToken]);
 
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    if (!mapboxAccessToken || !map || !token) {
+      return undefined;
+    }
+
+    async function handleMapClick(event) {
+      if (!mapPickTarget) {
+        return;
+      }
+
+      setReverseLoading(true);
+      setMapError('');
+
+      try {
+        const location = await apiRequest('/optimizer/reverse-geocode', {
+          token,
+          method: 'POST',
+          body: {
+            lat: event.lngLat.lat,
+            lng: event.lngLat.lng
+          }
+        });
+
+        setForm((prev) => ({ ...prev, [mapPickTarget]: location.address }));
+        setSelectedLocations((prev) => ({ ...prev, [mapPickTarget]: location }));
+      } catch (error) {
+        setMapError(error.message || 'Không xác định được địa chỉ tại vị trí đã chọn.');
+      } finally {
+        setReverseLoading(false);
+      }
+    }
+
+    map.on('click', handleMapClick);
+    return () => {
+      map.off('click', handleMapClick);
+    };
+  }, [mapPickTarget, mapboxAccessToken, token]);
+
   useEffect(() => () => {
     markerRefs.current.forEach((marker) => marker.remove());
     markerRefs.current = [];
@@ -1017,12 +1153,33 @@ function RouteMapPage({ orders, token }) {
           </div>
 
           <form className="stack" onSubmit={handleCalculateRoute}>
+            {mapboxAccessToken ? (
+              <div className="map-pick-controls">
+                <button
+                  type="button"
+                  className={mapPickTarget === 'origin' ? 'inline-button active' : 'inline-button'}
+                  onClick={() => setMapPickTarget('origin')}
+                >
+                  Chọn điểm đi trên bản đồ
+                </button>
+                <button
+                  type="button"
+                  className={mapPickTarget === 'destination' ? 'inline-button active' : 'inline-button'}
+                  onClick={() => setMapPickTarget('destination')}
+                >
+                  Chọn điểm đến trên bản đồ
+                </button>
+                {reverseLoading ? <span className="muted">Đang định vị...</span> : null}
+              </div>
+            ) : null}
+
             <label>
               Điểm đi
               <div className="address-autocomplete">
                 <input
                   value={form.origin}
                   onFocus={() => setActiveSuggestionField('origin')}
+                  onBlur={() => setTimeout(() => setActiveSuggestionField(''), 150)}
                   onChange={(event) => handleAddressInputChange('origin', event.target.value)}
                   placeholder="Ví dụ: TP. Hồ Chí Minh"
                 />
@@ -1049,6 +1206,7 @@ function RouteMapPage({ orders, token }) {
                 <input
                   value={form.destination}
                   onFocus={() => setActiveSuggestionField('destination')}
+                  onBlur={() => setTimeout(() => setActiveSuggestionField(''), 150)}
                   onChange={(event) => handleAddressInputChange('destination', event.target.value)}
                   placeholder="Ví dụ: Hà Nội"
                 />
@@ -1068,6 +1226,23 @@ function RouteMapPage({ orders, token }) {
                 ) : null}
               </div>
             </label>
+
+            <div className="stack">
+              <div className="section-row">
+                <strong>Điểm dừng trung gian</strong>
+                <button type="button" className="inline-button" onClick={addWaypoint}>Thêm điểm</button>
+              </div>
+              {form.waypoints.map((waypoint, index) => (
+                <div key={`waypoint-${index}`} className="waypoint-row">
+                  <input
+                    value={waypoint}
+                    onChange={(event) => updateWaypoint(index, event.target.value)}
+                    placeholder={`Điểm dừng ${index + 1}`}
+                  />
+                  <button type="button" className="inline-button danger" onClick={() => removeWaypoint(index)}>Xóa</button>
+                </div>
+              ))}
+            </div>
 
             <label>
               Phương thức di chuyển
@@ -1149,6 +1324,14 @@ function RouteMapPage({ orders, token }) {
                   ))}
                 </div>
               </div>
+            ) : mapboxAccessToken ? (
+              <div className="route-map-shell">
+                <div className="route-map-overlay">
+                  <strong>{mapPickTarget === 'origin' ? 'Đang chọn điểm đi' : 'Đang chọn điểm đến'}</strong>
+                  <span>Bấm trực tiếp trên bản đồ</span>
+                </div>
+                <div ref={mapContainerRef} className="route-map-canvas" />
+              </div>
             ) : (
               <div className="route-map-canvas route-map-empty">
                 <p className="muted">Nhập tuyến đường rồi bấm "Tính lộ trình" để xem hành trình.</p>
@@ -1200,8 +1383,17 @@ function RouteMapPage({ orders, token }) {
 }
 
 function OptimizerPage({ orders, trucks, token }) {
-  const candidateOrders = orders.filter((order) => ['PENDING_DISPATCH', 'ASSIGNED'].includes(order.status));
-  const candidateTrucks = trucks.filter((truck) => ['AVAILABLE', 'IN_USE'].includes(truck.status));
+  const [optimizerInputs, setOptimizerInputs] = useState({ orders: [], trucks: [] });
+  const sourceOrders = optimizerInputs.orders.length ? optimizerInputs.orders : orders;
+  const sourceTrucks = optimizerInputs.trucks.length ? optimizerInputs.trucks : trucks;
+  const candidateOrders = useMemo(
+    () => sourceOrders.filter((order) => ['PENDING_DISPATCH', 'ASSIGNED'].includes(order.status)),
+    [sourceOrders]
+  );
+  const candidateTrucks = useMemo(
+    () => sourceTrucks.filter((truck) => ['AVAILABLE', 'IN_USE'].includes(truck.status)),
+    [sourceTrucks]
+  );
   const [depot, setDepot] = useState('TP.HCM');
   const [selectedTruckIds, setSelectedTruckIds] = useState(candidateTrucks.slice(0, 2).map((truck) => truck.id));
   const [selectedOrderIds, setSelectedOrderIds] = useState(candidateOrders.slice(0, 5).map((order) => order.id));
@@ -1215,7 +1407,59 @@ function OptimizerPage({ orders, trucks, token }) {
   );
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [inputLoading, setInputLoading] = useState(false);
   const [error, setError] = useState('');
+
+  useEffect(() => {
+    let active = true;
+
+    async function loadOptimizerInputs() {
+      setInputLoading(true);
+      setError('');
+      try {
+        const data = await apiRequest('/optimizer/inputs', { token });
+        if (!active) {
+          return;
+        }
+        setOptimizerInputs({
+          orders: data.orders || [],
+          trucks: data.trucks || []
+        });
+      } catch (requestError) {
+        if (active) {
+          setError(requestError.message);
+        }
+      } finally {
+        if (active) {
+          setInputLoading(false);
+        }
+      }
+    }
+
+    if (token) {
+      loadOptimizerInputs();
+    }
+
+    return () => {
+      active = false;
+    };
+  }, [token]);
+
+  useEffect(() => {
+    setSelectedTruckIds((previous) => {
+      const availableIds = new Set(candidateTrucks.map((truck) => truck.id));
+      const kept = previous.filter((id) => availableIds.has(id));
+      return kept.length ? kept : candidateTrucks.slice(0, 2).map((truck) => truck.id);
+    });
+  }, [candidateTrucks]);
+
+  useEffect(() => {
+    setSelectedOrderIds((previous) => {
+      const availableIds = new Set(candidateOrders.map((order) => order.id));
+      const kept = previous.filter((id) => availableIds.has(id));
+      return kept.length ? kept : candidateOrders.slice(0, 5).map((order) => order.id);
+    });
+  }, [candidateOrders]);
 
   useEffect(() => {
     setTimeWindowMap((previous) => {
@@ -1300,6 +1544,8 @@ function OptimizerPage({ orders, trucks, token }) {
             <div className="stack">
               <h3>Chọn xe</h3>
               <div className="selection-list">
+                {inputLoading ? <p className="muted">Đang tải danh sách xe...</p> : null}
+                {!inputLoading && !candidateTrucks.length ? <p className="muted">Chưa có xe sẵn sàng để tối ưu.</p> : null}
                 {candidateTrucks.map((truck) => (
                   <label key={truck.id} className="selection-card">
                     <input
@@ -1319,6 +1565,8 @@ function OptimizerPage({ orders, trucks, token }) {
             <div className="stack">
               <h3>Chọn đơn hàng</h3>
               <div className="selection-list">
+                {inputLoading ? <p className="muted">Đang tải danh sách đơn hàng...</p> : null}
+                {!inputLoading && !candidateOrders.length ? <p className="muted">Chưa có đơn hàng chờ điều phối.</p> : null}
                 {candidateOrders.map((order) => (
                   <div key={order.id} className="selection-card selection-card-wide">
                     <label className="selection-card-main">
@@ -1930,6 +2178,212 @@ function OrdersPage({ rows, customers, form, setForm, onSave, onEdit }) {
   );
 }
 
+function TrackingPage({ token, trips }) {
+  const [latest, setLatest] = useState([]);
+  const [selectedTripId, setSelectedTripId] = useState('');
+  const [history, setHistory] = useState([]);
+  const [form, setForm] = useState({ latitude: '', longitude: '', speed_kmh: '', heading: '', note: '' });
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  async function loadTracking(tripId = selectedTripId) {
+    setLoading(true);
+    setError('');
+    try {
+      const latestRows = await apiRequest('/tracking/latest', { token });
+      setLatest(latestRows);
+      if (tripId) {
+        setHistory(await apiRequest(`/tracking/trips/${tripId}/locations`, { token }));
+      }
+    } catch (loadError) {
+      setError(loadError.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadTracking().catch((loadError) => {
+      setError(loadError.message);
+      setLoading(false);
+    });
+  }, []);
+
+  async function handleSubmit(event) {
+    event.preventDefault();
+    if (!selectedTripId) {
+      setError('Cần chọn chuyến để ghi tọa độ.');
+      return;
+    }
+    setError('');
+    try {
+      await apiRequest(`/tracking/trips/${selectedTripId}/locations`, {
+        token,
+        method: 'POST',
+        body: {
+          latitude: Number(form.latitude),
+          longitude: Number(form.longitude),
+          speed_kmh: form.speed_kmh === '' ? null : Number(form.speed_kmh),
+          heading: form.heading === '' ? null : Number(form.heading),
+          note: form.note
+        }
+      });
+      setForm({ latitude: '', longitude: '', speed_kmh: '', heading: '', note: '' });
+      await loadTracking(selectedTripId);
+    } catch (submitError) {
+      setError(submitError.message);
+    }
+  }
+
+  function useBrowserLocation() {
+    if (!navigator.geolocation) {
+      setError('Trình duyệt không hỗ trợ lấy vị trí.');
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        setForm((prev) => ({
+          ...prev,
+          latitude: String(position.coords.latitude.toFixed(7)),
+          longitude: String(position.coords.longitude.toFixed(7)),
+          speed_kmh: position.coords.speed ? String((position.coords.speed * 3.6).toFixed(1)) : prev.speed_kmh
+        }));
+      },
+      (locationError) => setError(locationError.message)
+    );
+  }
+
+  return (
+    <section className="stack">
+      <div className="page-header">
+        <div>
+          <p className="eyebrow">Giám sát</p>
+          <h2>GPS realtime đội xe</h2>
+        </div>
+        <button className="inline-button" onClick={() => loadTracking(selectedTripId)}>
+          {loading ? 'Đang tải...' : 'Làm mới'}
+        </button>
+      </div>
+      {error ? <p className="error-text">{error}</p> : null}
+
+      <div className="forecast-grid">
+        <div className="panel stack">
+          <div>
+            <h3>Ghi tọa độ xe</h3>
+            <p className="muted">Dispatcher có thể nhập tọa độ test; tài xế có thể dùng nút lấy vị trí trên màn chuyến được giao.</p>
+          </div>
+          <form className="stack" onSubmit={handleSubmit}>
+            <label>
+              Chuyến
+              <select
+                value={selectedTripId}
+                onChange={(event) => {
+                  const tripId = event.target.value;
+                  setSelectedTripId(tripId);
+                  loadTracking(tripId).catch((loadError) => setError(loadError.message));
+                }}
+              >
+                <option value="">Chọn chuyến</option>
+                {trips.map((trip) => (
+                  <option key={trip.id} value={trip.id}>{trip.trip_code} - {trip.license_plate}</option>
+                ))}
+              </select>
+            </label>
+            <div className="time-window-grid">
+              <label>
+                Latitude
+                <input type="number" step="0.0000001" value={form.latitude} onChange={(event) => setForm((prev) => ({ ...prev, latitude: event.target.value }))} />
+              </label>
+              <label>
+                Longitude
+                <input type="number" step="0.0000001" value={form.longitude} onChange={(event) => setForm((prev) => ({ ...prev, longitude: event.target.value }))} />
+              </label>
+            </div>
+            <div className="time-window-grid">
+              <label>
+                Tốc độ km/h
+                <input type="number" step="0.1" value={form.speed_kmh} onChange={(event) => setForm((prev) => ({ ...prev, speed_kmh: event.target.value }))} />
+              </label>
+              <label>
+                Hướng
+                <input type="number" step="0.1" value={form.heading} onChange={(event) => setForm((prev) => ({ ...prev, heading: event.target.value }))} />
+              </label>
+            </div>
+            <label>
+              Ghi chú
+              <textarea value={form.note} onChange={(event) => setForm((prev) => ({ ...prev, note: event.target.value }))} />
+            </label>
+            <div className="action-row">
+              <button className="primary-button">Lưu tọa độ</button>
+              <button className="inline-button" type="button" onClick={useBrowserLocation}>Lấy vị trí trình duyệt</button>
+            </div>
+          </form>
+        </div>
+
+        <div className="panel">
+          <h3>Vị trí mới nhất</h3>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Chuyến</th>
+                  <th>Xe</th>
+                  <th>Tài xế</th>
+                  <th>Tọa độ</th>
+                  <th>Tốc độ</th>
+                  <th>Thời gian</th>
+                </tr>
+              </thead>
+              <tbody>
+                {latest.map((row) => (
+                  <tr key={row.id}>
+                    <td>{row.trip_code}</td>
+                    <td>{row.license_plate}</td>
+                    <td>{row.driver_name}</td>
+                    <td>{formatNumber(row.latitude, 6)}, {formatNumber(row.longitude, 6)}</td>
+                    <td>{row.speed_kmh ?? '--'}</td>
+                    <td>{row.recorded_at}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div className="panel">
+        <h3>Lịch sử tọa độ chuyến đang chọn</h3>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Latitude</th>
+                <th>Longitude</th>
+                <th>Tốc độ</th>
+                <th>Ghi chú</th>
+                <th>Thời gian</th>
+              </tr>
+            </thead>
+            <tbody>
+              {history.map((row, index) => (
+                <tr key={row.id}>
+                  <td>{index + 1}</td>
+                  <td>{formatNumber(row.latitude, 7)}</td>
+                  <td>{formatNumber(row.longitude, 7)}</td>
+                  <td>{row.speed_kmh ?? '--'}</td>
+                  <td>{row.note || '--'}</td>
+                  <td>{row.recorded_at}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function DispatchPage({ trips, orders, trucks, drivers, tripForm, setTripForm, onSaveTrip, onAssignOrders, refresh }) {
   const availableOrders = orders.filter((order) => order.status === 'PENDING_DISPATCH' || order.status === 'ASSIGNED');
 
@@ -2042,7 +2496,51 @@ function DispatchCard({ trip, availableOrders, onAssignOrders, refresh }) {
   );
 }
 
-function TripsPage({ trips, auth, onTripStatus, refresh }) {
+function DriverLocationControls({ trip, token }) {
+  const [status, setStatus] = useState('');
+
+  function submitLocation() {
+    setStatus('Đang lấy vị trí...');
+    if (!navigator.geolocation) {
+      setStatus('Trình duyệt không hỗ trợ GPS.');
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      async (position) => {
+        try {
+          await apiRequest(`/tracking/trips/${trip.id}/locations`, {
+            token,
+            method: 'POST',
+            body: {
+              latitude: position.coords.latitude,
+              longitude: position.coords.longitude,
+              speed_kmh: position.coords.speed ? Number((position.coords.speed * 3.6).toFixed(1)) : null,
+              heading: position.coords.heading,
+              note: 'Cập nhật từ trình duyệt tài xế'
+            }
+          });
+          setStatus('Đã gửi vị trí GPS.');
+        } catch (error) {
+          setStatus(error.message);
+        }
+      },
+      (error) => setStatus(error.message),
+      { enableHighAccuracy: true, timeout: 10000 }
+    );
+  }
+
+  return (
+    <div className="stack driver-location-box">
+      <button className="inline-button" type="button" onClick={submitLocation}>
+        Gửi vị trí GPS hiện tại
+      </button>
+      {status ? <p className="muted">{status}</p> : null}
+    </div>
+  );
+}
+
+function TripsPage({ trips, auth, onTripStatus, refresh, token }) {
   useEffect(() => {
     refresh('trips').catch((error) => {
       console.error(error);
@@ -2094,6 +2592,7 @@ function TripsPage({ trips, auth, onTripStatus, refresh }) {
                 </button>
               ) : null}
             </div>
+            {auth.user.role === 'DRIVER' ? <DriverLocationControls trip={trip} token={token} /> : null}
           </div>
         ))}
       </div>
@@ -2180,6 +2679,7 @@ export default function App() {
   const [userForm, setUserForm] = useState({ username: '', full_name: '', role: 'DISPATCHER', password: '' });
   const [depotForm, setDepotForm] = useState({ depot_code: '', name: '', location: '', latitude: '', longitude: '', status: 'ACTIVE' });
   const navigate = useNavigate();
+  const location = useLocation();
 
   const isAuthenticated = Boolean(auth.token);
 
@@ -2226,6 +2726,49 @@ export default function App() {
       console.error(error);
     });
   }, [loadAll]);
+
+  useEffect(() => {
+    function handleAuthExpired(event) {
+      const message = event?.detail || 'Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.';
+      setAuth({ token: '', user: null });
+      setLoginError(message);
+      navigate('/login');
+    }
+
+    window.addEventListener('tms-auth-expired', handleAuthExpired);
+    return () => window.removeEventListener('tms-auth-expired', handleAuthExpired);
+  }, [navigate, setAuth]);
+
+  useEffect(() => {
+    if (!token) {
+      return;
+    }
+
+    let target = 'all';
+    if (location.pathname === '/') {
+      target = 'dashboard';
+    } else if (location.pathname.startsWith('/users')) {
+      target = 'users';
+    } else if (location.pathname.startsWith('/depots')) {
+      target = 'depots';
+    } else if (location.pathname.startsWith('/trucks')) {
+      target = 'trucks';
+    } else if (location.pathname.startsWith('/drivers')) {
+      target = 'drivers';
+    } else if (location.pathname.startsWith('/customers')) {
+      target = 'customers';
+    } else if (location.pathname.startsWith('/orders') || location.pathname.startsWith('/route-map')) {
+      target = 'orders';
+    } else if (location.pathname.startsWith('/dispatch') || location.pathname.startsWith('/tracking')) {
+      target = 'dispatch';
+    } else if (location.pathname.startsWith('/trips') || location.pathname.startsWith('/driver/trips')) {
+      target = 'trips';
+    }
+
+    loadAll(target).catch((error) => {
+      console.error(error);
+    });
+  }, [location.pathname, loadAll, token]);
 
   async function handleLogin(credentials) {
     setLoginLoading(true);
@@ -2317,6 +2860,7 @@ export default function App() {
           <>
             <Route path="/" element={<DashboardPage summary={summary} />} />
             <Route path="/forecasting" element={<ForecastingPage token={token} trucks={trucks} refreshTrucks={loadAll} />} />
+            <Route path="/reports" element={<ReportExportsPage token={token} />} />
             {role === 'ADMIN' ? (
               <>
                 <Route
@@ -2426,6 +2970,7 @@ export default function App() {
             {role === 'DISPATCHER' ? (
               <>
             <Route path="/route-map" element={<RouteMapPage orders={orders} token={token} />} />
+            <Route path="/tracking" element={<TrackingPage token={token} trips={trips} />} />
             <Route path="/optimizer" element={<OptimizerPage orders={orders} trucks={trucks} token={token} />} />
             <Route path="/optimizer-history" element={<OptimizerHistoryPage token={token} />} />
             <Route
@@ -2457,13 +3002,13 @@ export default function App() {
                 />
               }
             />
-            <Route path="/trips" element={<TripsPage trips={trips} auth={auth} onTripStatus={updateTripStatus} refresh={loadAll} />} />
+            <Route path="/trips" element={<TripsPage trips={trips} auth={auth} onTripStatus={updateTripStatus} refresh={loadAll} token={token} />} />
               </>
             ) : null}
           </>
         ) : (
           <>
-            <Route path="/driver/trips" element={<TripsPage trips={trips} auth={auth} onTripStatus={updateTripStatus} />} />
+            <Route path="/driver/trips" element={<TripsPage trips={trips} auth={auth} onTripStatus={updateTripStatus} refresh={loadAll} token={token} />} />
             <Route path="*" element={<Navigate to="/driver/trips" replace />} />
           </>
         )}

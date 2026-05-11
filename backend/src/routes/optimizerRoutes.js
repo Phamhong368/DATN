@@ -2,7 +2,7 @@ import express from 'express';
 import { query, withTransaction } from '../config/db.js';
 import { asyncHandler } from '../utils/http.js';
 import { optimizeRoutesWithOrTools } from '../utils/optimizerService.js';
-import { attachCoordinatesToOptimizationInput, resolveAddressCoordinate } from '../utils/geocoding.js';
+import { attachCoordinatesToOptimizationInput, resolveAddressCoordinate, reverseGeocodeCoordinate } from '../utils/geocoding.js';
 import { buildRoutePreview } from '../utils/routePreview.js';
 
 const router = express.Router();
@@ -237,6 +237,15 @@ router.post(
       ...result,
       saved
     });
+  })
+);
+
+router.post(
+  '/reverse-geocode',
+  asyncHandler(async (req, res) => {
+    const { lat, lng } = req.body || {};
+    const location = await reverseGeocodeCoordinate({ lat, lng });
+    res.json(location);
   })
 );
 

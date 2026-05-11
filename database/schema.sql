@@ -104,6 +104,23 @@ CREATE TABLE IF NOT EXISTS trip_status_logs (
   CONSTRAINT fk_trip_status_user FOREIGN KEY (updated_by) REFERENCES users(id)
 );
 
+CREATE TABLE IF NOT EXISTS trip_location_logs (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  trip_id INT NOT NULL,
+  latitude DECIMAL(10,7) NOT NULL,
+  longitude DECIMAL(10,7) NOT NULL,
+  speed_kmh DECIMAL(10,2) NULL,
+  heading DECIMAL(10,2) NULL,
+  note TEXT,
+  recorded_by INT NULL,
+  recorded_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_trip_location_trip FOREIGN KEY (trip_id) REFERENCES trips(id) ON DELETE CASCADE,
+  CONSTRAINT fk_trip_location_user FOREIGN KEY (recorded_by) REFERENCES users(id),
+  INDEX idx_trip_location_trip_time (trip_id, recorded_at),
+  INDEX idx_trip_location_recorded_at (recorded_at)
+);
+
 CREATE TABLE IF NOT EXISTS depots (
   id INT PRIMARY KEY AUTO_INCREMENT,
   depot_code VARCHAR(30) NOT NULL UNIQUE,

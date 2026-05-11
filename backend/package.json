@@ -5,7 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "nodemon src/server.js",
-    "start": "node src/server.js"
+    "start": "node src/server.js",
+    "test": "node --test",
+    "test:integration": "RUN_DB_TESTS=1 node --test test/api.integration.test.js",
+    "smoke": "node scripts/smoke.mjs",
+    "benchmark:vrp": "node scripts/benchmark-vrp.mjs"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

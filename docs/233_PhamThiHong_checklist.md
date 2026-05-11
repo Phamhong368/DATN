@@ -1,86 +1,71 @@
-# Checklist Tiến độ Đồ án Tốt nghiệp
+# Checklist Đối Chiếu Yêu Cầu Đồ Án
 
-Dựa trên đối chiếu giữa đề cương ĐATN và hiện trạng mã nguồn trong thư mục `/Users/phamhong/Documents/DATN`.
+Cập nhật: 11/05/2026.
 
-## Giai đoạn: Tuần 1 - 2 (Đã hoàn thành)
-- [x] Khảo sát nghiệp vụ vận tải và xác định phạm vi hệ thống quản lý xe tải.
-- [x] Thu thập và mô tả yêu cầu hệ thống trong tài liệu đặc tả.
-- [x] Hoàn thiện tài liệu đặc tả nghiệp vụ ban đầu.
+Đề tài: **Xây dựng hệ thống quản lý, vận hành xe tải**.
 
-Căn cứ:
-- `dacta.docx`
-- `docs/bandactavathietkebosungdocx.docx`
+Quy ước: mục nào **100%** thì không ghi chú; mục nào còn cấn mới ghi chú ngắn.
 
-## Giai đoạn: Tuần 3 - 4 (Đã hoàn thành)
-- [x] Thiết kế cơ sở dữ liệu MySQL cho các phân hệ người dùng, xe, tài xế, khách hàng, đơn hàng, chuyến đi, tối ưu lộ trình và dữ liệu nhiên liệu.
-- [x] Hoàn thiện phần thiết kế hệ thống/UML theo đề cương.
-- [x] Chuẩn bị tài liệu thiết kế phục vụ triển khai các giai đoạn sau.
+## Tổng Quan
 
-Căn cứ:
-- `database/schema.sql`
-- `docs/bandactavathietkebosungdocx.docx`
-- Phần sơ đồ thiết kế theo bạn xác nhận đã đẩy lên GitHub trước đó.
+| Hạng mục | Hoàn thiện | Ghi chú |
+| --- | ---: | --- |
+| MVP phục vụ bảo vệ | 92% | Còn slide, ảnh minh chứng, kịch bản demo. |
+| So với toàn bộ đề cương | 84% | Còn cloud public, GPS thiết bị thật, dashboard KPI sâu, bảo mật production. |
+| Hồ sơ nộp bảo vệ | 90% | Cần đóng gói báo cáo/slide cuối. |
 
-## Giai đoạn: Tuần 5 - 6 (Đã hoàn thành)
-- [x] Cài đặt môi trường phát triển NodeJS, ReactJS, MySQL.
-- [x] Xây dựng hạ tầng backend API với Express và JWT Authentication.
-- [x] Hoàn thiện API quản lý danh mục chính gồm Xe, Tài xế, Khách hàng.
+## Checklist Chính
 
-Căn cứ:
-- `README.md`
-- `backend/src/app.js`
-- `backend/src/routes/truckRoutes.js`
-- `backend/src/routes/driverRoutes.js`
-- `backend/src/routes/customerRoutes.js`
-- `frontend/package.json`
-- `backend/package.json`
+| STT | Yêu cầu đồ án | Hoàn thiện | Ghi chú |
+| ---: | --- | ---: | --- |
+| 1 | Khảo sát nghiệp vụ và xác định bài toán vận tải | 100% | |
+| 2 | Thiết kế kiến trúc Client-Server | 100% | |
+| 3 | Backend NodeJS/Express API | 100% | |
+| 4 | Frontend ReactJS | 100% | |
+| 5 | Database MySQL | 100% | |
+| 6 | Đăng nhập JWT | 100% | |
+| 7 | Phân quyền RBAC Admin/Dispatcher/Driver | 100% | |
+| 8 | Quản lý người dùng, xe, tài xế, khách hàng, kho | 100% | |
+| 9 | Quản lý đơn hàng | 100% | |
+| 10 | Điều phối chuyến hàng | 100% | |
+| 11 | Gán xe, tài xế, đơn hàng vào chuyến | 100% | |
+| 12 | Tài xế xem và cập nhật trạng thái chuyến | 100% | |
+| 13 | Workflow Dispatching - Tracking - Closure | 100% | |
+| 14 | Dashboard/Analytics tổng quan | 90% | Cần thêm KPI sâu theo xe/tài xế. |
+| 15 | Tối ưu lộ trình VRP bằng Google OR-Tools | 100% | |
+| 16 | Ràng buộc tải trọng xe | 100% | |
+| 17 | Ràng buộc khung giờ giao hàng VRPTW | 100% | |
+| 18 | Lưu lịch sử tối ưu và tạo chuyến từ kết quả | 100% | |
+| 19 | Benchmark VRP >= 1.000 dòng | 100% | |
+| 20 | Dự báo nhiên liệu bằng Regression | 100% | |
+| 21 | Đánh giá mô hình bằng R2, MAE, RMSE, MAPE | 100% | |
+| 22 | Cảnh báo bảo trì theo km tích lũy | 100% | |
+| 23 | Mapbox route preview | 100% | |
+| 24 | Geocode, reverse-geocode, chọn điểm trên bản đồ | 100% | |
+| 25 | GPS tracking mức MVP | 90% | Chưa phải thiết bị GPS thật/WebSocket. |
+| 26 | Export Excel báo cáo | 100% | |
+| 27 | Export PDF báo cáo | 85% | PDF còn đơn giản. |
+| 28 | Dockerfile backend/frontend | 100% | |
+| 29 | Docker Compose full stack | 100% | |
+| 30 | Cloud/staging | 60% | Có hướng dẫn, chưa deploy public thật. |
+| 31 | Unit test | 100% | |
+| 32 | Integration test với MySQL thật | 100% | |
+| 33 | Frontend component test | 100% | |
+| 34 | E2E browser test | 100% | |
+| 35 | Smoke check | 100% | |
+| 36 | CI GitHub Actions | 100% | |
+| 37 | Tài liệu test-case | 100% | |
+| 38 | Outline slide bảo vệ | 100% | |
+| 39 | Slide/báo cáo cuối | 70% | Cần dàn trang và chèn ảnh minh chứng. |
+| 40 | Kịch bản demo bảo vệ | 70% | Cần viết trình tự demo ngắn. |
 
-## Giai đoạn: Tuần 7 - 8 (Đã hoàn thành)
-- [x] Phát triển chức năng quản lý đơn hàng.
-- [x] Phát triển chức năng điều xe, tạo chuyến đi, gán đơn vào chuyến.
-- [x] Tích hợp bản đồ cho màn hình lộ trình và hiển thị giao diện vận hành trực quan.
+## Còn Cấn Chính
 
-Căn cứ:
-- `backend/src/routes/orderRoutes.js`
-- `backend/src/routes/tripRoutes.js`
-- `frontend/src/App.jsx`
-
-## Giai đoạn: Tuần 9 - 10 (Đã hoàn thành)
-- [x] Xây dựng module dự báo nhiên liệu bằng mô hình hồi quy.
-- [x] Xây dựng module tối ưu lộ trình giao hàng.
-- [x] Tích hợp thuật toán tối ưu và hiển thị kết quả trên giao diện người dùng.
-
-Căn cứ:
-- `backend/src/routes/analyticsRoutes.js`
-- `backend/src/utils/regression.js`
-- `backend/src/routes/optimizerRoutes.js`
-- `backend/src/utils/optimizerService.js`
-- `backend/optimizer/solver.py`
-- `frontend/src/App.jsx`
-
-## Giai đoạn: Tuần 11 - 12 (Chưa hoàn thành / Cần thực hiện tiếp)
-- [ ] Xây dựng bộ Unit Test chính thức cho backend/frontend.
-- [ ] Xây dựng bộ Integration Test cho các luồng chính như đăng nhập, điều phối, tối ưu lộ trình, dự báo nhiên liệu.
-- [x] Sửa nhiều lỗi runtime và hoàn thiện các luồng chính để hệ thống chạy được khi demo.
-- [ ] Bổ sung tài liệu kiểm thử hoặc bảng test case chứng minh kết quả kiểm thử.
-
-Căn cứ:
-- Repo hiện chưa có thư mục test riêng hoặc script `npm test`.
-- Frontend và backend hiện đã chạy được local, nhưng thiếu artifact kiểm thử chính thức.
-
-## Giai đoạn: Tuần 13 (Hoàn thành một phần / Cần hoàn thiện tiếp)
-- [x] Đã có tài liệu đặc tả và tài liệu thiết kế bổ sung phục vụ viết báo cáo.
-- [ ] Hoàn thiện báo cáo ĐATN bản cuối cùng theo cấu trúc chuẩn nộp bảo vệ.
-- [ ] Hoàn thiện slide thuyết trình bảo vệ.
-- [ ] Gom đầy đủ minh chứng kỹ thuật, hình ảnh giao diện, sơ đồ và kết quả kiểm thử vào bộ tài liệu cuối.
-
-Căn cứ:
-- `dacta.docx`
-- `docs/bandactavathietkebosungdocx.docx`
-- `README.md`
-- `docs/technical-checklist.md`
-
-## Nhận xét tổng hợp
-- Các mốc triển khai kỹ thuật chính từ tuần 5 đến tuần 10 đã bám khá sát với code hiện có.
-- Phần còn thiếu chủ yếu tập trung ở kiểm thử chính thức và đóng gói tài liệu bảo vệ.
-- Nếu cần nộp checklist cho giảng viên, có thể giữ nguyên cấu trúc file này và chỉ cập nhật thêm link GitHub/ảnh minh chứng cho từng giai đoạn.
+| STT | Việc còn cấn | Mức độ | Ghi chú |
+| ---: | --- | ---: | --- |
+| 1 | GPS thiết bị thật/WebSocket realtime | 60% | Hiện mới là GPS qua trình duyệt. |
+| 2 | Cloud deploy public | 60% | Cần tài khoản/secret cloud. |
+| 3 | Dashboard KPI sâu | 70% | Cần doanh thu, tiêu hao, hiệu suất theo từng xe/tài xế. |
+| 4 | Báo cáo PDF chuyên nghiệp | 85% | Đã xuất được, cần template đẹp hơn. |
+| 5 | Bảo mật production | 75% | Cần refresh token, rate limit, audit log. |
+| 6 | Slide và ảnh minh chứng | 70% | Cần hoàn thiện trước bảo vệ. |

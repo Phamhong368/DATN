@@ -1,4 +1,5 @@
 DELETE FROM trip_status_logs;
+DELETE FROM trip_location_logs;
 DELETE FROM trip_orders;
 DELETE FROM trips;
 DELETE FROM fuel_logs;
@@ -23,6 +24,7 @@ ALTER TABLE orders AUTO_INCREMENT = 1;
 ALTER TABLE trips AUTO_INCREMENT = 1;
 ALTER TABLE trip_orders AUTO_INCREMENT = 1;
 ALTER TABLE trip_status_logs AUTO_INCREMENT = 1;
+ALTER TABLE trip_location_logs AUTO_INCREMENT = 1;
 ALTER TABLE fuel_logs AUTO_INCREMENT = 1;
 ALTER TABLE depots AUTO_INCREMENT = 1;
 ALTER TABLE route_optimizations AUTO_INCREMENT = 1;
@@ -99,6 +101,12 @@ INSERT INTO trip_status_logs (trip_id, status, updated_by, note) VALUES
   (2, 'ASSIGNED', 2, 'Đã gán chuyến'),
   (2, 'COMPLETED', 2, 'Đơn hàng đã hoàn tất'),
   (3, 'ASSIGNED', 2, 'Chờ tài xế xác nhận');
+
+INSERT INTO trip_location_logs (trip_id, latitude, longitude, speed_kmh, heading, note, recorded_by, recorded_at) VALUES
+  (1, 10.7769000, 106.7009000, 38.5, 25, 'Rời kho TP.HCM', 3, '2026-04-18 08:15:00'),
+  (1, 11.3254000, 106.4770000, 52.0, 12, 'Qua Bình Dương', 3, '2026-04-18 10:10:00'),
+  (1, 16.0544000, 108.2022000, 46.0, 5, 'Gần điểm giao Đà Nẵng', 3, '2026-04-19 07:30:00'),
+  (3, 12.2388000, 109.1967000, 0.0, 0, 'Đang chờ khởi hành tại Nha Trang', 2, '2026-04-19 06:50:00');
 
 INSERT INTO fuel_logs (
   truck_id, trip_id, log_date, distance_km, fuel_liters, payload_tons,

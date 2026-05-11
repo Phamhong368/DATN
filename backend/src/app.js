@@ -11,6 +11,7 @@ import reportRoutes from './routes/reportRoutes.js'
 import optimizerRoutes from './routes/optimizerRoutes.js'
 import analyticsRoutes from './routes/analyticsRoutes.js'
 import userRoutes from './routes/userRoutes.js'
+import trackingRoutes from './routes/trackingRoutes.js'
 import { authenticate, authorize } from './middleware/auth.js'
 import cors from 'cors'
 import path from 'path'
@@ -41,6 +42,7 @@ app.use('/trips', authenticate, tripRoutes)
 app.use('/reports', authenticate, authorize('DISPATCHER'), reportRoutes)
 app.use('/optimizer', authenticate, authorize('DISPATCHER'), optimizerRoutes)
 app.use('/analytics', authenticate, authorize('DISPATCHER'), analyticsRoutes)
+app.use('/tracking', authenticate, trackingRoutes)
 app.use('/users', authenticate, authorize('ADMIN'), userRoutes)
 
 app.use((error, _req, res, _next) => {

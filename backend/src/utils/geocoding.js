@@ -16,6 +16,10 @@ function getGoogleMapsApiKey() {
   return process.env.GOOGLE_MAPS_API_KEY || process.env.VITE_GOOGLE_MAPS_API_KEY || '';
 }
 
+function getMapboxAccessToken() {
+  return process.env.MAPBOX_ACCESS_TOKEN || process.env.VITE_MAPBOX_ACCESS_TOKEN || '';
+}
+
 function normalizeAddress(address) {
   return String(address || '').trim();
 }
@@ -25,20 +29,10 @@ function getCacheKey(address) {
 }
 
 export function hasGeocodingEnabled() {
-  return Boolean(getGoogleMapsApiKey());
+  return Boolean(getGoogleMapsApiKey() || getMapboxAccessToken());
 }
 
-export async function geocodeAddress(address) {
-  const normalizedAddress = normalizeAddress(address);
-  if (!normalizedAddress) {
-    throw new Error('Địa chỉ trống, không thể geocode.');
-  }
-
-  const cacheKey = getCacheKey(normalizedAddress);
-  if (geocodeCache.has(cacheKey)) {
-    return geocodeCache.get(cacheKey);
-  }
-
+async function geocodeWithGoogle(normalizedAddress) {
   const apiKey = getGoogleMapsApiKey();
   if (!apiKey) {
     throw new Error('Thiếu GOOGLE_MAPS_API_KEY trên backend.');
@@ -65,13 +59,110 @@ export async function geocodeAddress(address) {
   }
 
   const [firstResult] = payload.results;
-  const coordinate = {
-    lat: Number(firstResult.geometry.location.lat),
-    lng: Number(firstResult.geometry.location.lng)
+  return {
+    address: firstResult.formatted_address || normalizedAddress,
+    coordinate: {
+      lat: Number(firstResult.geometry.location.lat),
+      lng: Number(firstResult.geometry.location.lng)
+    }
   };
+}
 
-  geocodeCache.set(cacheKey, coordinate);
-  return coordinate;
+async function geocodeWithMapbox(normalizedAddress) {
+  const accessToken = getMapboxAccessToken();
+  if (!accessToken) {
+    throw new Error('Thiếu MAPBOX_ACCESS_TOKEN trên backend.');
+  }
+
+  const url = new URL(`https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(normalizedAddress)}.json`);
+  url.searchParams.set('access_token', accessToken);
+  url.searchParams.set('limit', '1');
+  url.searchParams.set('country', 'vn');
+  url.searchParams.set('language', 'vi');
+
+  const response = await fetch(url, {
+    headers: {
+      Accept: 'application/json'
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(`Mapbox Geocoding API trả về HTTP ${response.status}.`);
+  }
+
+  const payload = await response.json();
+  const [feature] = payload.features || [];
+  if (!feature?.center) {
+    throw new Error(`Mapbox không tìm thấy tọa độ cho "${normalizedAddress}".`);
+  }
+
+  return {
+    address: feature.place_name || normalizedAddress,
+    coordinate: {
+      lng: Number(feature.center[0]),
+      lat: Number(feature.center[1])
+    }
+  };
+}
+
+export async function reverseGeocodeCoordinate({ lat, lng }) {
+  const latitude = Number(lat);
+  const longitude = Number(lng);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    throw new Error('Tọa độ không hợp lệ.');
+  }
+
+  const accessToken = getMapboxAccessToken();
+  if (!accessToken) {
+    return {
+      address: `${latitude.toFixed(6)}, ${longitude.toFixed(6)}`,
+      coordinate: { lat: latitude, lng: longitude }
+    };
+  }
+
+  const url = new URL(`https://api.mapbox.com/geocoding/v5/mapbox.places/${longitude},${latitude}.json`);
+  url.searchParams.set('access_token', accessToken);
+  url.searchParams.set('limit', '1');
+  url.searchParams.set('language', 'vi');
+
+  const response = await fetch(url, {
+    headers: {
+      Accept: 'application/json'
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(`Mapbox Reverse Geocoding API trả về HTTP ${response.status}.`);
+  }
+
+  const payload = await response.json();
+  const [feature] = payload.features || [];
+  return {
+    address: feature?.place_name || `${latitude.toFixed(6)}, ${longitude.toFixed(6)}`,
+    coordinate: { lat: latitude, lng: longitude }
+  };
+}
+
+export async function geocodeAddress(address) {
+  const normalizedAddress = normalizeAddress(address);
+  if (!normalizedAddress) {
+    throw new Error('Địa chỉ trống, không thể geocode.');
+  }
+
+  const cacheKey = getCacheKey(normalizedAddress);
+  if (geocodeCache.has(cacheKey)) {
+    return geocodeCache.get(cacheKey);
+  }
+
+  let result = null;
+  try {
+    result = await geocodeWithGoogle(normalizedAddress);
+  } catch {
+    result = await geocodeWithMapbox(normalizedAddress);
+  }
+
+  geocodeCache.set(cacheKey, result.coordinate);
+  return result.coordinate;
 }
 
 export async function resolveAddressCoordinate(address) {

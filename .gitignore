@@ -5,4 +5,7 @@ dist
 backend/.env
 frontend/.env
 npm-debug.log*
-
+playwright-report
+test-results
+frontend/playwright-report
+frontend/test-results

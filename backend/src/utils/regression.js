@@ -55,44 +55,109 @@ function round(value, digits = 4) {
   return Number(Number(value || 0).toFixed(digits));
 }
 
-export function trainFuelRegression(rows) {
-  if (rows.length < 5) {
-    throw new Error('Cần ít nhất 5 bản ghi nhiên liệu để huấn luyện mô hình.');
-  }
-
-  const featureMatrix = rows.map((row) => [
+function buildFeatureMatrix(rows) {
+  return rows.map((row) => [
     1,
     Number(row.distance_km),
     Number(row.payload_tons || 0),
     Number(row.idle_minutes || 0),
     Number(row.avg_speed_kmh || 0)
   ]);
+}
+
+function predictFromCoefficients(coefficients, row) {
+  const vector = [
+    1,
+    Number(row.distance_km),
+    Number(row.payload_tons || 0),
+    Number(row.idle_minutes || 0),
+    Number(row.avg_speed_kmh || 0)
+  ];
+
+  return vector.reduce((sum, value, index) => sum + value * coefficients[index], 0);
+}
+
+function calculateMetrics(actuals, predictions) {
+  if (!actuals.length) {
+    return {
+      sampleSize: 0,
+      r2: 0,
+      mae: 0,
+      rmse: 0,
+      mape: 0
+    };
+  }
+
+  const actualMean = actuals.reduce((sum, value) => sum + value, 0) / actuals.length;
+  const rss = actuals.reduce((sum, actual, index) => sum + (actual - predictions[index]) ** 2, 0);
+  const tss = actuals.reduce((sum, actual) => sum + (actual - actualMean) ** 2, 0);
+  const mae = actuals.reduce((sum, actual, index) => sum + Math.abs(actual - predictions[index]), 0) / actuals.length;
+  const rmse = Math.sqrt(rss / actuals.length);
+  const mape =
+    actuals.reduce((sum, actual, index) => {
+      if (actual === 0) {
+        return sum;
+      }
+      return sum + Math.abs((actual - predictions[index]) / actual);
+    }, 0) / actuals.filter((actual) => actual !== 0).length;
+
+  return {
+    sampleSize: actuals.length,
+    r2: round(tss === 0 ? 1 : 1 - rss / tss, 6),
+    mae: round(mae, 4),
+    rmse: round(rmse, 4),
+    mape: round((mape || 0) * 100, 2)
+  };
+}
+
+function trainCoefficients(rows) {
+  if (rows.length < 5) {
+    throw new Error('Cần ít nhất 5 bản ghi nhiên liệu để huấn luyện mô hình.');
+  }
+
+  const featureMatrix = buildFeatureMatrix(rows);
   const targetMatrix = rows.map((row) => [Number(row.fuel_liters)]);
-  const featureNames = ['intercept', 'distance_km', 'payload_tons', 'idle_minutes', 'avg_speed_kmh'];
 
   const xt = transpose(featureMatrix);
   const xtx = multiply(xt, featureMatrix);
   const xtxInverse = invert(xtx);
   const xty = multiply(xt, targetMatrix);
-  const coefficients = multiply(xtxInverse, xty).map((row) => row[0]);
+  return multiply(xtxInverse, xty).map((row) => row[0]);
+}
 
-  const predictions = featureMatrix.map((featureRow) =>
-    featureRow.reduce((sum, value, index) => sum + value * coefficients[index], 0)
-  );
-  const actuals = targetMatrix.map((row) => row[0]);
-  const actualMean = actuals.reduce((sum, value) => sum + value, 0) / actuals.length;
-  const rss = actuals.reduce((sum, actual, index) => sum + (actual - predictions[index]) ** 2, 0);
-  const tss = actuals.reduce((sum, actual) => sum + (actual - actualMean) ** 2, 0);
-  const mae = actuals.reduce((sum, actual, index) => sum + Math.abs(actual - predictions[index]), 0) / actuals.length;
+export function trainFuelRegression(rows) {
+  const featureNames = ['intercept', 'distance_km', 'payload_tons', 'idle_minutes', 'avg_speed_kmh'];
+  const coefficients = trainCoefficients(rows);
+
+  const predictions = rows.map((row) => predictFromCoefficients(coefficients, row));
+  const actuals = rows.map((row) => Number(row.fuel_liters));
+  const trainingMetrics = calculateMetrics(actuals, predictions);
+  const holdoutSize = rows.length >= 10 ? Math.max(2, Math.round(rows.length * 0.2)) : 0;
+  const trainRows = holdoutSize ? rows.slice(0, rows.length - holdoutSize) : rows;
+  const testRows = holdoutSize ? rows.slice(rows.length - holdoutSize) : [];
+  let testMetrics = null;
+
+  if (testRows.length && trainRows.length >= 5) {
+    const holdoutCoefficients = trainCoefficients(trainRows);
+    const testPredictions = testRows.map((row) => predictFromCoefficients(holdoutCoefficients, row));
+    testMetrics = calculateMetrics(
+      testRows.map((row) => Number(row.fuel_liters)),
+      testPredictions
+    );
+  }
 
   return {
     featureNames,
     coefficients: Object.fromEntries(featureNames.map((name, index) => [name, round(coefficients[index], 6)])),
     metrics: {
-      sampleSize: rows.length,
-      r2: round(tss === 0 ? 1 : 1 - rss / tss, 6),
-      mae: round(mae, 4)
-    }
+      ...trainingMetrics,
+      trainSampleSize: trainRows.length,
+      testSampleSize: testRows.length,
+      test: testMetrics
+    },
+    evaluationNote: testMetrics
+      ? 'MAE/RMSE/MAPE test được tính bằng holdout 20% cuối theo thời gian.'
+      : 'Chưa đủ dữ liệu để tách tập test riêng; metric đang tính trên toàn bộ tập huấn luyện.'
   };
 }
 
