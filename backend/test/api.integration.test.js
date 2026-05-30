@@ -60,9 +60,11 @@ async function startApp() {
   process.env.DB_NAME = process.env.DB_NAME || 'tms_integration_test';
 
   dbModule = await import('../src/config/db.js');
+  const { ensureAnalyticsSchema } = await import('../src/utils/bootstrap.js');
   const { default: app } = await import('../src/app.js');
 
   await dbModule.connectDB(1);
+  await ensureAnalyticsSchema();
 
   appServer = http.createServer(app);
   await new Promise((resolve, reject) => {
