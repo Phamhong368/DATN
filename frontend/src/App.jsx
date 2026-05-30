@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Navigate, Route, Routes, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import mapboxgl from 'mapbox-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
+import { GoogleMap, Marker, Polyline, useJsApiLoader } from '@react-google-maps/api';
 import {
   Bar,
   BarChart,
@@ -28,24 +29,45 @@ const navItems = [
   { key: 'optimizer', label: 'Tối ưu lộ trình', path: '/optimizer', roles: ['DISPATCHER'] },
   { key: 'optimizer-history', label: 'Lịch sử tối ưu', path: '/optimizer-history', roles: ['DISPATCHER'] },
   { key: 'route-map', label: 'Bản đồ lộ trình', path: '/route-map', roles: ['DISPATCHER'] },
-  { key: 'tracking', label: 'GPS realtime', path: '/tracking', roles: ['DISPATCHER'] },
+  { key: 'tracking', label: 'GPS thời gian thực', path: '/tracking', roles: ['DISPATCHER'] },
   { key: 'reports', label: 'Báo cáo', path: '/reports', roles: ['ADMIN', 'DISPATCHER'] },
-  { key: 'forecasting', label: 'Dự báo nhiên liệu', path: '/forecasting', roles: ['ADMIN', 'DISPATCHER'] }
+  { key: 'forecasting', label: 'Dự báo nhiên liệu', path: '/forecasting', roles: ['ADMIN', 'DISPATCHER'] },
+  { key: 'customer-orders', label: 'Đơn hàng của tôi', path: '/customer/orders', roles: ['CUSTOMER'] }
 ];
 
 const orderStatusOptions = ['PENDING_DISPATCH', 'ASSIGNED', 'IN_TRANSIT', 'COMPLETED', 'CANCELLED'];
 const tripStatusOptions = ['PLANNED', 'ASSIGNED', 'IN_TRANSIT', 'COMPLETED', 'INCIDENT'];
 const mapboxAccessToken = import.meta.env.VITE_MAPBOX_ACCESS_TOKEN || '';
+const googleMapsApiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
+const googleMapsLibraries = ['places'];
 const roleById = {
   1: 'ADMIN',
   2: 'DISPATCHER',
-  3: 'DRIVER'
+  3: 'DRIVER',
+  4: 'CUSTOMER'
 };
+const DEFAULT_ROUTE_MAP_CENTER = [105.8032, 21.0074];
+const DEFAULT_ROUTE_MAP_ZOOM = 12;
 
 function useAuthState() {
+  function normalizeStoredAuth(rawAuth) {
+    if (!rawAuth || !rawAuth.user) {
+      return { token: '', user: null };
+    }
+
+    return {
+      ...rawAuth,
+      user: {
+        ...rawAuth.user,
+        role: rawAuth.user.role || roleById[rawAuth.user.role_id] || 'DISPATCHER',
+        fullName: rawAuth.user.fullName || rawAuth.user.full_name || rawAuth.user.username
+      }
+    };
+  }
+
   const [auth, setAuth] = useState(() => {
     const raw = localStorage.getItem('tms-auth');
-    return raw ? JSON.parse(raw) : { token: '', user: null };
+    return raw ? normalizeStoredAuth(JSON.parse(raw)) : { token: '', user: null };
   });
 
   useEffect(() => {
@@ -70,11 +92,271 @@ function formatNumber(value, digits = 1) {
   }).format(Number(value || 0));
 }
 
+function formatMinutesAsDuration(totalMinutes) {
+  const minutes = Number(totalMinutes || 0);
+  if (!Number.isFinite(minutes) || minutes <= 0) {
+    return '--';
+  }
+
+  const days = Math.floor(minutes / (24 * 60));
+  const hours = Math.floor((minutes % (24 * 60)) / 60);
+  const remainMinutes = minutes % 60;
+  if (days > 0) {
+    return `${days} ngày ${hours} giờ ${remainMinutes} phút`;
+  }
+  if (hours > 0) {
+    return `${hours} giờ ${remainMinutes} phút`;
+  }
+  return `${remainMinutes} phút`;
+}
+
+function formatPlanningClockLabel(clockValue) {
+  const raw = String(clockValue || '').trim();
+  const match = raw.match(/^(\d+):(\d{2})$/);
+  if (!match) {
+    return raw || '--';
+  }
+
+  const hours = Number(match[1]);
+  const minutes = match[2];
+  if (hours < 24) {
+    return `${String(hours).padStart(2, '0')}:${minutes}`;
+  }
+
+  const day = Math.floor(hours / 24) + 1;
+  const remainHours = hours % 24;
+  return `Ngày ${day} · ${String(remainHours).padStart(2, '0')}:${minutes}`;
+}
+
+function stripVietnamese(text) {
+  return String(text || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+}
+
+function normalizeAddressLabel(address) {
+  const raw = String(address || '').trim();
+  if (!raw) {
+    return '';
+  }
+
+  const normalizedKey = stripVietnamese(raw).replace(/[.,]/g, '').replace(/\s+/g, ' ').trim();
+  const aliases = {
+    'ha noi': 'Hà Nội',
+    'hanoi': 'Hà Nội',
+    'hai phong': 'Hải Phòng',
+    'hue': 'Huế',
+    'da nang': 'Đà Nẵng',
+    'nghe an': 'Nghệ An',
+    'quang ngai': 'Quảng Ngãi',
+    'tp hcm': 'TP.HCM',
+    'tphcm': 'TP.HCM',
+    'ho chi minh': 'TP.HCM',
+    'binh duong': 'Bình Dương',
+    'quang nam': 'Quảng Nam'
+  };
+
+  return aliases[normalizedKey] || raw;
+}
+
+function formatRouteLabel(start, end) {
+  const pickup = normalizeAddressLabel(start);
+  const delivery = normalizeAddressLabel(end);
+  if (!pickup && !delivery) {
+    return '--';
+  }
+  if (!pickup) {
+    return delivery;
+  }
+  if (!delivery) {
+    return pickup;
+  }
+  return `${pickup} - ${delivery}`;
+}
+
+function buildAddressKey(address) {
+  return stripVietnamese(address)
+    .replace(/[^\w\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function buildDistinctWaypointAddresses(addresses, excluded = []) {
+  const seen = new Set(excluded.map((item) => buildAddressKey(item)).filter(Boolean));
+  return addresses.reduce((result, address) => {
+    const normalized = normalizeAddressLabel(address);
+    const key = buildAddressKey(normalized);
+    if (!normalized || !key || seen.has(key)) {
+      return result;
+    }
+    seen.add(key);
+    result.push(normalized);
+    return result;
+  }, []);
+}
+
+function buildTripWaypointAddresses(trip) {
+  if (!trip?.orders?.length) {
+    return [];
+  }
+
+  const rawStops = [];
+  trip.orders.forEach((order) => {
+    rawStops.push(order.pickup_location, order.delivery_location);
+  });
+
+  return buildDistinctWaypointAddresses(rawStops, [trip.origin, trip.destination]);
+}
+
+function deriveOptimizerArea(address) {
+  const raw = String(address || '').trim();
+  if (!raw) {
+    return '';
+  }
+
+  const normalized = buildAddressKey(normalizeAddressLabel(raw));
+  const aliases = [
+    ['ha noi', 'Hà Nội'],
+    ['tp hcm', 'TP.HCM'],
+    ['ho chi minh', 'TP.HCM'],
+    ['binh duong', 'Bình Dương'],
+    ['da nang', 'Đà Nẵng'],
+    ['nha trang', 'Nha Trang'],
+    ['khanh hoa', 'Nha Trang'],
+    ['hue', 'Huế'],
+    ['quang ngai', 'Quảng Ngãi'],
+    ['quang nam', 'Quảng Nam'],
+    ['hai phong', 'Hải Phòng'],
+    ['nghe an', 'Nghệ An'],
+    ['can tho', 'Cần Thơ'],
+    ['long an', 'Long An'],
+    ['dong nai', 'Đồng Nai']
+  ];
+
+  const matched = aliases.find(([needle]) => normalized.includes(needle));
+  if (matched) {
+    return matched[1];
+  }
+
+  const segments = raw
+    .split(',')
+    .map((segment) => normalizeAddressLabel(segment))
+    .filter(Boolean);
+  return segments[segments.length - 1] || normalizeAddressLabel(raw);
+}
+
+function buildOptimizerProposal(candidateOrders, candidateTrucks, depotSuggestions = []) {
+  if (!candidateOrders.length || !candidateTrucks.length) {
+    return {
+      depot: depotSuggestions[0] || 'TP.HCM',
+      selectedTruckIds: candidateTrucks.slice(0, 1).map((truck) => truck.id),
+      selectedOrderIds: candidateOrders.slice(0, 5).map((order) => order.id),
+      totalWeightTons: 0,
+      totalCapacityTons: 0
+    };
+  }
+
+  const prioritizedOrders = [...candidateOrders].sort((left, right) => {
+    const leftPriority = left.status === 'PENDING_DISPATCH' ? 0 : 1;
+    const rightPriority = right.status === 'PENDING_DISPATCH' ? 0 : 1;
+    if (leftPriority !== rightPriority) {
+      return leftPriority - rightPriority;
+    }
+    return Number(right.planned_revenue || 0) - Number(left.planned_revenue || 0) || right.id - left.id;
+  });
+
+  const proposedOrders = prioritizedOrders.slice(0, Math.min(prioritizedOrders.length, 8));
+  const selectedOrderIds = proposedOrders.map((order) => order.id);
+  const totalWeightTons = proposedOrders.reduce((sum, order) => sum + Number(order.weight_tons || 0), 0);
+
+  const sortedTrucks = [...candidateTrucks].sort(
+    (left, right) => Number(right.capacity_tons || 0) - Number(left.capacity_tons || 0) || left.id - right.id
+  );
+
+  let selectedTrucks = [];
+  let accumulatedCapacity = 0;
+  const targetCapacity = totalWeightTons * 1.12;
+  for (const truck of sortedTrucks) {
+    selectedTrucks.push(truck);
+    accumulatedCapacity += Number(truck.capacity_tons || 0);
+    if (accumulatedCapacity >= targetCapacity) {
+      break;
+    }
+  }
+  if (!selectedTrucks.length && sortedTrucks[0]) {
+    selectedTrucks = [sortedTrucks[0]];
+    accumulatedCapacity = Number(sortedTrucks[0].capacity_tons || 0);
+  }
+
+  const pickupFrequency = new Map();
+  proposedOrders.forEach((order) => {
+    const area = deriveOptimizerArea(order.pickup_location || order.delivery_location);
+    if (!area) {
+      return;
+    }
+    pickupFrequency.set(area, (pickupFrequency.get(area) || 0) + 1);
+  });
+
+  const preferredDepot = [...pickupFrequency.entries()].sort((left, right) => right[1] - left[1])[0]?.[0];
+  const matchedDepotSuggestion = depotSuggestions.find(
+    (suggestion) => buildAddressKey(suggestion) === buildAddressKey(preferredDepot)
+  );
+
+  return {
+    depot: matchedDepotSuggestion || preferredDepot || depotSuggestions[0] || 'TP.HCM',
+    selectedTruckIds: selectedTrucks.map((truck) => truck.id),
+    selectedOrderIds,
+    totalWeightTons,
+    totalCapacityTons: accumulatedCapacity
+  };
+}
+
+function formatCoordinateLabel(location) {
+  if (!location?.latitude || !location?.longitude) {
+    return 'Chưa có';
+  }
+  return `${formatNumber(location.latitude, 5)}, ${formatNumber(location.longitude, 5)}`;
+}
+
+function formatRecordedAt(value) {
+  if (!value) {
+    return 'Chưa có';
+  }
+  return new Intl.DateTimeFormat('vi-VN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    day: '2-digit',
+    month: '2-digit'
+  }).format(new Date(value));
+}
+
+function calculateAirDistanceKm(pointA, pointB) {
+  if (!pointA?.lat || !pointA?.lng || !pointB?.lat || !pointB?.lng) {
+    return null;
+  }
+
+  const toRadians = (value) => (value * Math.PI) / 180;
+  const earthRadiusKm = 6371;
+  const latitudeDelta = toRadians(pointB.lat - pointA.lat);
+  const longitudeDelta = toRadians(pointB.lng - pointA.lng);
+  const latitudeA = toRadians(pointA.lat);
+  const latitudeB = toRadians(pointB.lat);
+
+  const haversine =
+    Math.sin(latitudeDelta / 2) * Math.sin(latitudeDelta / 2) +
+    Math.cos(latitudeA) * Math.cos(latitudeB) * Math.sin(longitudeDelta / 2) * Math.sin(longitudeDelta / 2);
+
+  const angularDistance = 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine));
+  return earthRadiusKm * angularDistance;
+}
+
 function getRoleLabel(role) {
   const labels = {
     ADMIN: 'Quản trị viên',
     DISPATCHER: 'Điều phối viên',
-    DRIVER: 'Tài xế'
+    DRIVER: 'Tài xế',
+    CUSTOMER: 'Khách hàng'
   };
   return labels[role] || role;
 }
@@ -226,6 +508,72 @@ async function fetchMapboxSuggestions(query) {
       lat: feature.center?.[1]
     }
   }));
+}
+
+function fetchGoogleSuggestions(query) {
+  return new Promise((resolve, reject) => {
+    if (!window.google?.maps?.places?.AutocompleteService) {
+      resolve([]);
+      return;
+    }
+
+    const service = new window.google.maps.places.AutocompleteService();
+    service.getPlacePredictions(
+      {
+        input: query,
+        componentRestrictions: { country: 'vn' }
+      },
+      (predictions, status) => {
+        if (
+          status === window.google.maps.places.PlacesServiceStatus.ZERO_RESULTS ||
+          !predictions?.length
+        ) {
+          resolve([]);
+          return;
+        }
+
+        if (status !== window.google.maps.places.PlacesServiceStatus.OK) {
+          reject(new Error(`Google Places Autocomplete lỗi: ${status}`));
+          return;
+        }
+
+        resolve(
+          predictions.map((prediction) => ({
+            id: prediction.place_id,
+            label: prediction.description,
+            placeId: prediction.place_id
+          }))
+        );
+      }
+    );
+  });
+}
+
+function geocodeGooglePlaceId(placeId) {
+  return new Promise((resolve, reject) => {
+    if (!window.google?.maps?.Geocoder) {
+      reject(new Error('Google Geocoder chưa sẵn sàng.'));
+      return;
+    }
+
+    const geocoder = new window.google.maps.Geocoder();
+    geocoder.geocode({ placeId }, (results, status) => {
+      if (status !== 'OK' || !results?.length) {
+        reject(new Error(`Không lấy được tọa độ từ Google Places: ${status}`));
+        return;
+      }
+
+      const result = results[0];
+      const location = result.geometry?.location;
+      resolve({
+        address: result.formatted_address || '',
+        coordinate: {
+          lat: location.lat(),
+          lng: location.lng()
+        }
+      });
+    });
+  });
 }
 
 function Layout({ auth, onLogout, children }) {
@@ -850,11 +1198,12 @@ function ForecastingPage({ token, trucks, refreshTrucks }) {
   );
 }
 
-function RouteMapPage({ orders, token }) {
+function RouteMapPage({ orders, trips, token, apiNamespace = 'optimizer' }) {
+  const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const mapContainerRef = useRef(null);
-  const mapInstanceRef = useRef(null);
-  const markerRefs = useRef([]);
+  const googleMapRef = useRef(null);
+  const autoPreviewKeyRef = useRef('');
+  const requestKeyRef = useRef('');
   const [form, setForm] = useState({
     origin: '',
     destination: '',
@@ -870,14 +1219,55 @@ function RouteMapPage({ orders, token }) {
   const [selectedLocations, setSelectedLocations] = useState({ origin: null, destination: null });
   const [mapPickTarget, setMapPickTarget] = useState('destination');
   const [reverseLoading, setReverseLoading] = useState(false);
+  const {
+    isLoaded: isGoogleMapLoaded,
+    loadError: googleMapsLoadError
+  } = useJsApiLoader({
+    id: 'tms-google-maps',
+    googleMapsApiKey,
+    libraries: googleMapsLibraries
+  });
+  const isCustomerTrackingMode = apiNamespace === 'customer-portal';
   const previewPoints = useMemo(() => buildRoutePreviewPoints(routeResult?.stops || []), [routeResult]);
+  const selectedOrder = useMemo(() => {
+    const orderId = Number(searchParams.get('orderId'));
+    return orderId ? orders.find((order) => Number(order.id) === orderId) || null : null;
+  }, [orders, searchParams]);
+  const selectedTrip = useMemo(() => {
+    const tripId = Number(searchParams.get('tripId'));
+    return tripId ? trips.find((trip) => Number(trip.id) === tripId) || null : null;
+  }, [trips, searchParams]);
+  const activeContext = useMemo(() => {
+    if (selectedTrip) {
+      return {
+        type: 'trip',
+        title: `Theo dõi chuyến ${selectedTrip.trip_code}`,
+        subtitle: `${normalizeAddressLabel(selectedTrip.origin)} → ${normalizeAddressLabel(selectedTrip.destination)}`,
+        origin: normalizeAddressLabel(selectedTrip.origin),
+        destination: normalizeAddressLabel(selectedTrip.destination),
+        waypoints: buildTripWaypointAddresses(selectedTrip),
+        travelMode: 'DRIVING',
+        key: `trip-${selectedTrip.id}`
+      };
+    }
 
-  useEffect(() => {
+    if (selectedOrder) {
+      return {
+        type: 'order',
+        title: `Bản đồ đơn ${selectedOrder.order_code}`,
+        subtitle: `${normalizeAddressLabel(selectedOrder.pickup_location)} → ${normalizeAddressLabel(selectedOrder.delivery_location)}`,
+        origin: normalizeAddressLabel(selectedOrder.pickup_location),
+        destination: normalizeAddressLabel(selectedOrder.delivery_location),
+        waypoints: [],
+        travelMode: 'DRIVING',
+        key: `order-${selectedOrder.id}`
+      };
+    }
+
     const origin = searchParams.get('origin');
     const destination = searchParams.get('destination');
     const waypointsParam = searchParams.get('waypoints');
     let parsedWaypoints = [];
-
     if (waypointsParam) {
       try {
         parsedWaypoints = JSON.parse(waypointsParam);
@@ -885,16 +1275,37 @@ function RouteMapPage({ orders, token }) {
         parsedWaypoints = [];
       }
     }
-
     if (origin && destination) {
-      setForm((prev) => ({
-        ...prev,
+      return {
+        type: 'manual',
+        title: 'Bản đồ lộ trình',
+        subtitle: 'Tuyến nhập thủ công',
         origin,
         destination,
-        waypoints: parsedWaypoints
-      }));
+        waypoints: parsedWaypoints,
+        travelMode: searchParams.get('travelMode') || 'DRIVING',
+        key: `manual-${origin}-${destination}-${parsedWaypoints.join('|')}`
+      };
     }
-  }, [searchParams]);
+    return null;
+  }, [orders, searchParams, selectedOrder, selectedTrip, trips]);
+
+  useEffect(() => {
+    if (!activeContext) {
+      return;
+    }
+
+    setForm({
+      origin: activeContext.origin,
+      destination: activeContext.destination,
+      travelMode: activeContext.travelMode,
+      waypoints: activeContext.waypoints
+    });
+    setSelectedLocations({ origin: null, destination: null });
+    requestKeyRef.current = '';
+    setRouteResult(null);
+    setMapError('');
+  }, [activeContext]);
 
   useEffect(() => {
     if (!activeSuggestionField) {
@@ -908,7 +1319,8 @@ function RouteMapPage({ orders, token }) {
     }
 
     const timer = setTimeout(() => {
-      fetchMapboxSuggestions(query)
+      const fetchSuggestions = isGoogleMapLoaded ? fetchGoogleSuggestions : fetchMapboxSuggestions;
+      fetchSuggestions(query)
         .then((items) => {
           setAddressSuggestions((prev) => ({ ...prev, [activeSuggestionField]: items }));
         })
@@ -918,7 +1330,33 @@ function RouteMapPage({ orders, token }) {
     }, 250);
 
     return () => clearTimeout(timer);
-  }, [activeSuggestionField, form]);
+  }, [activeSuggestionField, form, isGoogleMapLoaded]);
+
+  async function requestRoutePreview(payload) {
+    const requestKey = JSON.stringify({
+      namespace: apiNamespace,
+      travelMode: payload.travelMode || 'DRIVING',
+      origin:
+        typeof payload.origin === 'string'
+          ? payload.origin
+          : payload.origin?.address || JSON.stringify(payload.origin || null),
+      destination:
+        typeof payload.destination === 'string'
+          ? payload.destination
+          : payload.destination?.address || JSON.stringify(payload.destination || null),
+      waypoints: Array.isArray(payload.waypoints) ? payload.waypoints : []
+    });
+    requestKeyRef.current = requestKey;
+    const preview = await apiRequest(`/${apiNamespace}/route-preview`, {
+      token,
+      method: 'POST',
+      body: payload
+    });
+    if (requestKeyRef.current === requestKey) {
+      setRouteResult(preview);
+    }
+    return preview;
+  }
 
   async function handleCalculateRoute(event) {
     event.preventDefault();
@@ -927,22 +1365,16 @@ function RouteMapPage({ orders, token }) {
     setRouteLoading(true);
 
     try {
-      const preview = await apiRequest('/optimizer/route-preview', {
-        token,
-        method: 'POST',
-        body: {
-          origin: selectedLocations.origin
-            ? { address: form.origin, coordinate: selectedLocations.origin.coordinate }
-            : form.origin,
-          destination: selectedLocations.destination
-            ? { address: form.destination, coordinate: selectedLocations.destination.coordinate }
-            : form.destination,
-          waypoints: form.waypoints,
-          travelMode: form.travelMode
-        }
+      await requestRoutePreview({
+        origin: selectedLocations.origin
+          ? { address: form.origin, coordinate: selectedLocations.origin.coordinate }
+          : form.origin,
+        destination: selectedLocations.destination
+          ? { address: form.destination, coordinate: selectedLocations.destination.coordinate }
+          : form.destination,
+        waypoints: form.waypoints,
+        travelMode: form.travelMode
       });
-
-      setRouteResult(preview);
     } catch (error) {
       setMapError(error.message || getGoogleMapsRouteErrorMessage(error));
       setRouteResult(null);
@@ -969,11 +1401,17 @@ function RouteMapPage({ orders, token }) {
     setAddressSuggestions((prev) => ({ ...prev, [field]: [] }));
   }
 
-  function selectSuggestion(field, suggestion) {
-    setForm((prev) => ({ ...prev, [field]: suggestion.label }));
-    setSelectedLocations((prev) => ({ ...prev, [field]: suggestion }));
-    setAddressSuggestions((prev) => ({ ...prev, [field]: [] }));
-    setActiveSuggestionField('');
+  async function selectSuggestion(field, suggestion) {
+    try {
+      const resolvedLocation = suggestion.placeId ? await geocodeGooglePlaceId(suggestion.placeId) : suggestion;
+      setForm((prev) => ({ ...prev, [field]: resolvedLocation.address || suggestion.label }));
+      setSelectedLocations((prev) => ({ ...prev, [field]: resolvedLocation }));
+    } catch (error) {
+      setMapError(error.message || 'Không lấy được tọa độ từ địa chỉ đã chọn.');
+    } finally {
+      setAddressSuggestions((prev) => ({ ...prev, [field]: [] }));
+      setActiveSuggestionField('');
+    }
   }
 
   function updateWaypoint(index, value) {
@@ -995,295 +1433,502 @@ function RouteMapPage({ orders, token }) {
   }
 
   useEffect(() => {
-    if (!mapboxAccessToken || !mapContainerRef.current) {
+    if (!activeContext?.origin || !activeContext?.destination || !token) {
       return;
     }
 
-    mapboxgl.accessToken = mapboxAccessToken;
+    const autoKey = JSON.stringify({
+      key: activeContext.key,
+      origin: activeContext.origin,
+      destination: activeContext.destination,
+      waypoints: activeContext.waypoints,
+      travelMode: activeContext.travelMode
+    });
 
-    try {
-      const map =
-        mapInstanceRef.current ||
-        new mapboxgl.Map({
-          container: mapContainerRef.current,
-          style: 'mapbox://styles/mapbox/streets-v12',
-          center: [106.7009, 16.0544],
-          zoom: 5
-        });
-
-      mapInstanceRef.current = map;
-
-      const renderRoute = () => {
-        setMapRenderError('');
-
-        markerRefs.current.forEach((marker) => marker.remove());
-        markerRefs.current = [];
-
-        const sourceId = 'route-preview-source';
-        const layerId = 'route-preview-layer';
-
-        if (map.getLayer(layerId)) {
-          map.removeLayer(layerId);
-        }
-        if (map.getSource(sourceId)) {
-          map.removeSource(sourceId);
-        }
-
-        if (!routeResult?.stops?.length) {
-          map.setCenter([106.7009, 16.0544]);
-          map.setZoom(5);
-          return;
-        }
-
-        const geojson = {
-          type: 'Feature',
-          geometry: {
-            type: 'LineString',
-            coordinates: (routeResult.path || []).map((point) => [point.lng, point.lat])
-          }
-        };
-
-        if (geojson.geometry.coordinates.length > 1) {
-          map.addSource(sourceId, { type: 'geojson', data: geojson });
-          map.addLayer({
-            id: layerId,
-            type: 'line',
-            source: sourceId,
-            layout: {
-              'line-cap': 'round',
-              'line-join': 'round'
-            },
-            paint: {
-              'line-color': '#2563eb',
-              'line-width': 5,
-              'line-opacity': 0.9
-            }
-          });
-        }
-
-        routeResult.stops.forEach((stop, index) => {
-          const markerElement = document.createElement('div');
-          markerElement.className = 'route-map-marker';
-          markerElement.textContent = String(index + 1);
-          const marker = new mapboxgl.Marker({ element: markerElement })
-            .setLngLat([stop.coordinate.lng, stop.coordinate.lat])
-            .setPopup(new mapboxgl.Popup({ offset: 18 }).setText(stop.address))
-            .addTo(map);
-          markerRefs.current.push(marker);
-        });
-
-        const bounds = new mapboxgl.LngLatBounds();
-        routeResult.stops.forEach((stop) => bounds.extend([stop.coordinate.lng, stop.coordinate.lat]));
-        map.fitBounds(bounds, { padding: 60, maxZoom: 11 });
-      };
-
-      if (map.isStyleLoaded()) {
-        renderRoute();
-      } else {
-        map.once('load', renderRoute);
-      }
-    } catch (error) {
-      setMapRenderError(error.message || 'Không thể hiển thị Mapbox. Đã chuyển sang sơ đồ tuyến nội bộ.');
+    if (autoPreviewKeyRef.current === autoKey) {
+      return;
     }
-  }, [routeResult, mapboxAccessToken]);
+
+    autoPreviewKeyRef.current = autoKey;
+    setRouteLoading(true);
+    setMapError('');
+
+    requestRoutePreview({
+      origin: activeContext.origin,
+      destination: activeContext.destination,
+      waypoints: activeContext.waypoints,
+      travelMode: activeContext.travelMode
+    })
+      .catch((error) => {
+        setMapError(error.message || getGoogleMapsRouteErrorMessage(error));
+        setRouteResult(null);
+      })
+      .finally(() => {
+        setRouteLoading(false);
+      });
+  }, [activeContext, token]);
 
   useEffect(() => {
-    const map = mapInstanceRef.current;
-    if (!mapboxAccessToken || !map || !token) {
-      return undefined;
+    if (!googleMapsLoadError) {
+      setMapRenderError('');
+      return;
     }
 
-    async function handleMapClick(event) {
-      if (!mapPickTarget) {
-        return;
+    setMapRenderError('Không tải được Google Maps. Hệ thống sẽ dùng sơ đồ tuyến nội bộ để hiển thị hành trình.');
+  }, [googleMapsLoadError]);
+
+  const routePath = routeResult?.path?.length
+    ? routeResult.path
+    : routeResult?.stops?.map((stop) => stop.coordinate) || [];
+  const activeGpsLocation = selectedTrip?.latest_location
+    ? selectedTrip.latest_location
+    : selectedOrder?.latest_latitude && selectedOrder?.latest_longitude
+      ? {
+          latitude: Number(selectedOrder.latest_latitude),
+          longitude: Number(selectedOrder.latest_longitude),
+          recorded_at: selectedOrder.latest_recorded_at
+        }
+      : null;
+  const activeGpsMarker = activeGpsLocation
+    ? {
+        lat: Number(activeGpsLocation.latitude),
+        lng: Number(activeGpsLocation.longitude)
       }
-
-      setReverseLoading(true);
-      setMapError('');
-
-      try {
-        const location = await apiRequest('/optimizer/reverse-geocode', {
-          token,
-          method: 'POST',
-          body: {
-            lat: event.lngLat.lat,
-            lng: event.lngLat.lng
-          }
-        });
-
-        setForm((prev) => ({ ...prev, [mapPickTarget]: location.address }));
-        setSelectedLocations((prev) => ({ ...prev, [mapPickTarget]: location }));
-      } catch (error) {
-        setMapError(error.message || 'Không xác định được địa chỉ tại vị trí đã chọn.');
-      } finally {
-        setReverseLoading(false);
-      }
+    : null;
+  const googleMapCenter =
+    routeResult?.stops?.[0]?.coordinate ||
+    activeGpsMarker ||
+    selectedLocations.origin?.coordinate ||
+    selectedLocations.destination?.coordinate ||
+    { lat: DEFAULT_ROUTE_MAP_CENTER[1], lng: DEFAULT_ROUTE_MAP_CENTER[0] };
+  const selectedTripWeight = selectedTrip?.orders?.reduce((sum, order) => sum + Number(order.weight_tons || 0), 0) || 0;
+  const selectedTripRevenue = selectedTrip?.orders?.reduce((sum, order) => sum + Number(order.planned_revenue || 0), 0) || 0;
+  const orderTripStatus = selectedOrder?.trip_status ? getStatusLabel(selectedOrder.trip_status) : 'Chưa gán chuyến';
+  const orderGpsLocationLabel = activeGpsLocation ? formatCoordinateLabel(activeGpsLocation) : 'Chưa có';
+  const orderGpsRecordedAt = activeGpsLocation?.recorded_at ? formatRecordedAt(activeGpsLocation.recorded_at) : 'Chưa có';
+  const orderRouteProgress = useMemo(() => {
+    if (!selectedOrder || !routeResult?.stops?.length || !activeGpsMarker) {
+      return null;
     }
 
-    map.on('click', handleMapClick);
-    return () => {
-      map.off('click', handleMapClick);
+    const origin = routeResult.stops[0]?.coordinate;
+    const destination = routeResult.stops[routeResult.stops.length - 1]?.coordinate;
+    const totalKm = calculateAirDistanceKm(origin, destination);
+    const remainingKm = calculateAirDistanceKm(activeGpsMarker, destination);
+
+    if (!totalKm || !remainingKm) {
+      return null;
+    }
+
+    const progressedKm = Math.max(0, totalKm - remainingKm);
+    const percent = Math.min(100, Math.max(0, (progressedKm / totalKm) * 100));
+    return {
+      remainingKm,
+      percent
     };
-  }, [mapPickTarget, mapboxAccessToken, token]);
+  }, [activeGpsMarker, routeResult, selectedOrder]);
+  const customerOrders = useMemo(() => orders.slice(0, 12), [orders]);
+  const orderedCustomerOrders = useMemo(() => {
+    if (!selectedOrder) {
+      return customerOrders;
+    }
+    return [...customerOrders].sort((left, right) => {
+      if (Number(left.id) === Number(selectedOrder.id)) {
+        return -1;
+      }
+      if (Number(right.id) === Number(selectedOrder.id)) {
+        return 1;
+      }
+      return 0;
+    });
+  }, [customerOrders, selectedOrder]);
+  const customerDestinationLabel = selectedOrder
+    ? normalizeAddressLabel(selectedOrder.delivery_location).replace(/, Việt Nam$/i, '')
+    : '';
+  const customerRouteIsLive = Boolean(selectedOrder?.trip_code);
+  const customerTrackingMessage = selectedOrder?.trip_code
+    ? `Đang trên đường đến ${customerDestinationLabel || 'điểm giao hàng'}`
+    : 'Tuyến ước tính của đơn hàng';
+  const customerTrackingSubline = selectedOrder?.trip_code
+    ? `${routeResult?.distanceText || '--'} · ETA ${routeResult?.durationText || '--'}`
+    : 'Đơn chưa được gán chuyến. Đường màu xanh là lộ trình dự kiến từ điểm lấy đến điểm giao.';
+  const customerEtaLabel = customerRouteIsLive ? routeResult?.durationText || '--' : 'Chờ điều phối';
+  const customerDistanceLabel = routeResult?.distanceText || '--';
+  const routePolylineOptions =
+    isCustomerTrackingMode && !customerRouteIsLive
+      ? {
+          strokeColor: '#0ea5e9',
+          strokeOpacity: 0.58,
+          strokeWeight: 4
+        }
+      : {
+          strokeColor: '#2563eb',
+          strokeOpacity: 0.92,
+          strokeWeight: 6
+        };
 
-  useEffect(() => () => {
-    markerRefs.current.forEach((marker) => marker.remove());
-    markerRefs.current = [];
-    mapInstanceRef.current?.remove();
-    mapInstanceRef.current = null;
-  }, []);
+  useEffect(() => {
+    const map = googleMapRef.current;
+    if (!isGoogleMapLoaded || !map || !routeResult?.stops?.length || !window.google?.maps) {
+      return;
+    }
+
+    try {
+      const bounds = new window.google.maps.LatLngBounds();
+      routeResult.stops.forEach((stop) => bounds.extend(stop.coordinate));
+      if (activeGpsMarker) {
+        bounds.extend(activeGpsMarker);
+      }
+      map.fitBounds(bounds, 60);
+    } catch (error) {
+      setMapRenderError(error.message || 'Không thể căn chỉnh bản đồ Google theo lộ trình.');
+    }
+  }, [activeGpsMarker, isGoogleMapLoaded, routeResult]);
+
+  async function handleGoogleMapClick(event) {
+    if (!mapPickTarget || !event.latLng) {
+      return;
+    }
+
+    setReverseLoading(true);
+    setMapError('');
+
+    try {
+      const location = await apiRequest(`/${apiNamespace}/reverse-geocode`, {
+        token,
+        method: 'POST',
+        body: {
+          lat: event.latLng.lat(),
+          lng: event.latLng.lng()
+        }
+      });
+
+      setForm((prev) => ({ ...prev, [mapPickTarget]: location.address }));
+      setSelectedLocations((prev) => ({ ...prev, [mapPickTarget]: location }));
+    } catch (error) {
+      setMapError(error.message || 'Không xác định được địa chỉ tại vị trí đã chọn.');
+    } finally {
+      setReverseLoading(false);
+    }
+  }
 
   return (
     <section className="stack">
       <div className="page-header">
         <div>
           <p className="eyebrow">Bản đồ</p>
-          <h2>Công cụ tính toán lộ trình tối ưu</h2>
+          <h2>{isCustomerTrackingMode ? 'Theo dõi đơn hàng của bạn' : 'Công cụ tính toán lộ trình tối ưu'}</h2>
+          {activeContext ? <p className="muted">{activeContext.title}: {activeContext.subtitle}</p> : null}
         </div>
       </div>
 
-      <div className="route-grid">
+      <div className={isCustomerTrackingMode ? 'route-grid customer-route-grid' : 'route-grid'}>
         <div className="panel stack">
-          <div>
-            <h3>Tính tuyến đường</h3>
-            <p className="muted">Nhập điểm đi, điểm đến hoặc chọn nhanh từ đơn hàng đã có trong hệ thống.</p>
-            {form.waypoints.length ? (
-              <p className="muted">Tuyến đang có {form.waypoints.length} điểm dừng trung gian từ lịch sử tối ưu.</p>
-            ) : null}
-          </div>
-
-          <form className="stack" onSubmit={handleCalculateRoute}>
-            {mapboxAccessToken ? (
-              <div className="map-pick-controls">
-                <button
-                  type="button"
-                  className={mapPickTarget === 'origin' ? 'inline-button active' : 'inline-button'}
-                  onClick={() => setMapPickTarget('origin')}
-                >
-                  Chọn điểm đi trên bản đồ
-                </button>
-                <button
-                  type="button"
-                  className={mapPickTarget === 'destination' ? 'inline-button active' : 'inline-button'}
-                  onClick={() => setMapPickTarget('destination')}
-                >
-                  Chọn điểm đến trên bản đồ
-                </button>
-                {reverseLoading ? <span className="muted">Đang định vị...</span> : null}
+          {isCustomerTrackingMode ? (
+            <>
+              <div>
+                <h3>Đơn hàng của bạn</h3>
+                <p className="muted">Chọn một đơn để xem lộ trình, ETA và vị trí vận chuyển hiện tại.</p>
               </div>
-            ) : null}
-
-            <label>
-              Điểm đi
-              <div className="address-autocomplete">
-                <input
-                  value={form.origin}
-                  onFocus={() => setActiveSuggestionField('origin')}
-                  onBlur={() => setTimeout(() => setActiveSuggestionField(''), 150)}
-                  onChange={(event) => handleAddressInputChange('origin', event.target.value)}
-                  placeholder="Ví dụ: TP. Hồ Chí Minh"
-                />
-                {activeSuggestionField === 'origin' && addressSuggestions.origin.length ? (
-                  <div className="address-suggestion-list">
-                    {addressSuggestions.origin.map((suggestion) => (
-                      <button
-                        key={suggestion.id}
-                        type="button"
-                        className="address-suggestion-item"
-                        onClick={() => selectSuggestion('origin', suggestion)}
-                      >
-                        {suggestion.label}
-                      </button>
-                    ))}
+              {selectedOrder ? (
+                <div className={customerRouteIsLive ? 'customer-order-hero live' : 'customer-order-hero estimate'}>
+                  <div className="customer-order-hero-top">
+                    <div>
+                      <strong>{selectedOrder.order_code}</strong>
+                      <p>{formatRouteLabel(selectedOrder.pickup_location, selectedOrder.delivery_location)}</p>
+                    </div>
+                    <span className="status-badge" style={{ background: statusColor(selectedOrder.status) }}>
+                      {getStatusLabel(selectedOrder.status)}
+                    </span>
                   </div>
-                ) : null}
-              </div>
-            </label>
-
-            <label>
-              Điểm đến
-              <div className="address-autocomplete">
-                <input
-                  value={form.destination}
-                  onFocus={() => setActiveSuggestionField('destination')}
-                  onBlur={() => setTimeout(() => setActiveSuggestionField(''), 150)}
-                  onChange={(event) => handleAddressInputChange('destination', event.target.value)}
-                  placeholder="Ví dụ: Hà Nội"
-                />
-                {activeSuggestionField === 'destination' && addressSuggestions.destination.length ? (
-                  <div className="address-suggestion-list">
-                    {addressSuggestions.destination.map((suggestion) => (
-                      <button
-                        key={suggestion.id}
-                        type="button"
-                        className="address-suggestion-item"
-                        onClick={() => selectSuggestion('destination', suggestion)}
-                      >
-                        {suggestion.label}
-                      </button>
-                    ))}
+                  <div className="customer-order-hero-metrics">
+                    <div>
+                      <small>Giá cước</small>
+                      <span>{formatCurrency(selectedOrder.planned_revenue)}</span>
+                    </div>
+                    <div>
+                      <small>Quãng đường</small>
+                      <span>{customerDistanceLabel}</span>
+                    </div>
+                    <div>
+                      <small>ETA</small>
+                      <span>{customerEtaLabel}</span>
+                    </div>
                   </div>
-                ) : null}
-              </div>
-            </label>
-
-            <div className="stack">
-              <div className="section-row">
-                <strong>Điểm dừng trung gian</strong>
-                <button type="button" className="inline-button" onClick={addWaypoint}>Thêm điểm</button>
-              </div>
-              {form.waypoints.map((waypoint, index) => (
-                <div key={`waypoint-${index}`} className="waypoint-row">
-                  <input
-                    value={waypoint}
-                    onChange={(event) => updateWaypoint(index, event.target.value)}
-                    placeholder={`Điểm dừng ${index + 1}`}
-                  />
-                  <button type="button" className="inline-button danger" onClick={() => removeWaypoint(index)}>Xóa</button>
                 </div>
-              ))}
-            </div>
+              ) : null}
+              <div className="customer-order-list">
+                {orderedCustomerOrders.map((order) => {
+                  const isActive = selectedOrder && Number(selectedOrder.id) === Number(order.id);
+                  return (
+                    <button
+                      key={order.id}
+                      className={isActive ? 'customer-order-card active' : 'customer-order-card'}
+                      onClick={() => navigate(`/customer/route-map?mode=order&orderId=${order.id}`)}
+                    >
+                      <div className="customer-order-card-head">
+                        <strong>{order.order_code}</strong>
+                        <span className="status-badge" style={{ background: statusColor(order.status) }}>
+                          {getStatusLabel(order.status)}
+                        </span>
+                      </div>
+                      <span>{formatRouteLabel(order.pickup_location, order.delivery_location)}</span>
+                      <small>{formatCurrency(order.planned_revenue)}</small>
+                    </button>
+                  );
+                })}
+              </div>
+            </>
+          ) : (
+            <>
+              <div>
+                <h3>Tính tuyến đường</h3>
+                <p className="muted">Nhập điểm đi, điểm đến hoặc chọn nhanh từ đơn hàng đã có trong hệ thống.</p>
+                {form.waypoints.length ? (
+                  <p className="muted">Tuyến đang có {form.waypoints.length} điểm dừng trung gian từ lịch sử tối ưu.</p>
+                ) : null}
+              </div>
 
-            <label>
-              Phương thức di chuyển
-              <select
-                value={form.travelMode}
-                onChange={(event) => setForm((prev) => ({ ...prev, travelMode: event.target.value }))}
-              >
-                <option value="DRIVING">Xe ô tô</option>
-                <option value="BICYCLING">Xe đạp</option>
-                <option value="WALKING">Đi bộ</option>
-                <option value="TRANSIT">Phương tiện công cộng</option>
-              </select>
-            </label>
+              <form className="stack" onSubmit={handleCalculateRoute}>
+                {isGoogleMapLoaded ? (
+                  <div className="map-pick-controls">
+                    <button
+                      type="button"
+                      className={mapPickTarget === 'origin' ? 'inline-button active' : 'inline-button'}
+                      onClick={() => setMapPickTarget('origin')}
+                    >
+                      Đặt điểm đi trên bản đồ
+                    </button>
+                    <button
+                      type="button"
+                      className={mapPickTarget === 'destination' ? 'inline-button active' : 'inline-button'}
+                      onClick={() => setMapPickTarget('destination')}
+                    >
+                      Đặt điểm đến trên bản đồ
+                    </button>
+                    {reverseLoading ? <span className="muted">Đang định vị...</span> : null}
+                  </div>
+                ) : null}
 
-            <button className="primary-button" disabled={routeLoading}>
-              {routeLoading ? 'Đang tính toán...' : 'Tính lộ trình'}
-            </button>
-          </form>
+                <label>
+                  Điểm đi
+                  <div className="address-autocomplete">
+                    <input
+                      value={form.origin}
+                      onFocus={() => setActiveSuggestionField('origin')}
+                      onBlur={() => setTimeout(() => setActiveSuggestionField(''), 150)}
+                      onChange={(event) => handleAddressInputChange('origin', event.target.value)}
+                      placeholder="Ví dụ: TP. Hồ Chí Minh"
+                    />
+                    {activeSuggestionField === 'origin' && addressSuggestions.origin.length ? (
+                      <div className="address-suggestion-list">
+                        {addressSuggestions.origin.map((suggestion) => (
+                          <button
+                            key={suggestion.id}
+                            type="button"
+                            className="address-suggestion-item"
+                            onClick={() => selectSuggestion('origin', suggestion)}
+                          >
+                            {suggestion.label}
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                </label>
 
-          <div className="stack">
-            <h3>Chọn nhanh từ đơn hàng</h3>
-            <div className="quick-order-list">
-              {orders.slice(0, 6).map((order) => (
-                <button key={order.id} className="quick-order-button" onClick={() => applyOrderRoute(order)}>
-                  <strong>{order.order_code}</strong>
-                  <span>{order.pickup_location} {'->'} {order.delivery_location}</span>
+                <label>
+                  Điểm đến
+                  <div className="address-autocomplete">
+                    <input
+                      value={form.destination}
+                      onFocus={() => setActiveSuggestionField('destination')}
+                      onBlur={() => setTimeout(() => setActiveSuggestionField(''), 150)}
+                      onChange={(event) => handleAddressInputChange('destination', event.target.value)}
+                      placeholder="Ví dụ: Hà Nội"
+                    />
+                    {activeSuggestionField === 'destination' && addressSuggestions.destination.length ? (
+                      <div className="address-suggestion-list">
+                        {addressSuggestions.destination.map((suggestion) => (
+                          <button
+                            key={suggestion.id}
+                            type="button"
+                            className="address-suggestion-item"
+                            onClick={() => selectSuggestion('destination', suggestion)}
+                          >
+                            {suggestion.label}
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                </label>
+
+                <div className="stack">
+                  <div className="section-row">
+                    <strong>Điểm dừng trung gian</strong>
+                    <button type="button" className="inline-button" onClick={addWaypoint}>Thêm điểm</button>
+                  </div>
+                  {form.waypoints.map((waypoint, index) => (
+                    <div key={`waypoint-${index}`} className="waypoint-row">
+                      <input
+                        value={waypoint}
+                        onChange={(event) => updateWaypoint(index, event.target.value)}
+                        placeholder={`Điểm dừng ${index + 1}`}
+                      />
+                      <button type="button" className="inline-button danger" onClick={() => removeWaypoint(index)}>Xóa</button>
+                    </div>
+                  ))}
+                </div>
+
+                <label>
+                  Phương thức di chuyển
+                  <select
+                    value={form.travelMode}
+                    onChange={(event) => setForm((prev) => ({ ...prev, travelMode: event.target.value }))}
+                  >
+                    <option value="DRIVING">Xe ô tô</option>
+                    <option value="BICYCLING">Xe đạp</option>
+                    <option value="WALKING">Đi bộ</option>
+                    <option value="TRANSIT">Phương tiện công cộng</option>
+                  </select>
+                </label>
+
+                <button className="primary-button" disabled={routeLoading}>
+                  {routeLoading ? 'Đang tính toán...' : 'Tính lộ trình'}
                 </button>
-              ))}
-            </div>
-          </div>
+              </form>
+
+              <div className="stack">
+                <h3>Chọn nhanh từ đơn hàng</h3>
+                <div className="quick-order-list">
+                  {orders.slice(0, 6).map((order) => (
+                    <button key={order.id} className="quick-order-button" onClick={() => applyOrderRoute(order)}>
+                      <strong>{order.order_code}</strong>
+                      <span>{order.pickup_location} {'->'} {order.delivery_location}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {trips.length ? (
+                <div className="stack">
+                  <h3>Chọn nhanh từ chuyến hàng</h3>
+                  <div className="quick-order-list">
+                    {trips.slice(0, 4).map((trip) => (
+                      <button
+                        key={trip.id}
+                        className="quick-order-button"
+                        onClick={() => {
+                          setForm({
+                            origin: normalizeAddressLabel(trip.origin),
+                            destination: normalizeAddressLabel(trip.destination),
+                            travelMode: 'DRIVING',
+                            waypoints: buildTripWaypointAddresses(trip)
+                          });
+                          setSelectedLocations({ origin: null, destination: null });
+                          setRouteResult(null);
+                          setMapError('');
+                        }}
+                      >
+                        <strong>{trip.trip_code}</strong>
+                        <span>{formatRouteLabel(trip.origin, trip.destination)}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </>
+          )}
         </div>
 
         <div className="stack">
           <div className="panel route-map-panel">
-            {routeResult && routeResult.stops?.length && mapboxAccessToken && !mapRenderError ? (
+            {routeResult && routeResult.stops?.length && isGoogleMapLoaded && !mapRenderError ? (
               <div className="route-map-shell">
                 <div className="route-map-overlay">
-                  <strong>{routeResult.distanceText}</strong>
-                  <span>{routeResult.durationText}</span>
+                  <strong>
+                    {isCustomerTrackingMode
+                      ? customerTrackingMessage
+                      : selectedTrip
+                        ? `Theo dõi ${selectedTrip.trip_code}`
+                        : routeResult.distanceText}
+                  </strong>
+                  <span>
+                    {isCustomerTrackingMode
+                      ? customerTrackingSubline
+                      : selectedTrip
+                        ? `${routeResult.distanceText} · ${routeResult.durationText}`
+                        : routeResult.durationText}
+                  </span>
                 </div>
-                <div ref={mapContainerRef} className="route-map-canvas" />
+                <GoogleMap
+                  mapContainerClassName="route-map-canvas"
+                  center={googleMapCenter}
+                  zoom={DEFAULT_ROUTE_MAP_ZOOM}
+                  onLoad={(map) => {
+                    googleMapRef.current = map;
+                  }}
+                  onUnmount={() => {
+                    googleMapRef.current = null;
+                  }}
+                  onClick={handleGoogleMapClick}
+                  options={{
+                    streetViewControl: false,
+                    mapTypeControl: false,
+                    fullscreenControl: false
+                  }}
+                >
+                  {routePath.length > 1 ? (
+                    <Polyline
+                      path={routePath}
+                      options={routePolylineOptions}
+                    />
+                  ) : null}
+                  {routeResult.stops.map((stop, index) => (
+                    <Marker
+                      key={`${stop.address}-${index}`}
+                      position={stop.coordinate}
+                      label={{
+                        text: index === 0 ? 'A' : index === routeResult.stops.length - 1 ? 'B' : String(index + 1),
+                        color: '#ffffff',
+                        fontWeight: '700'
+                      }}
+                      title={stop.address}
+                    />
+                  ))}
+                  {activeGpsMarker ? (
+                    <Marker
+                      position={activeGpsMarker}
+                      title={`GPS hiện tại · ${formatRecordedAt(activeGpsLocation?.recorded_at)}`}
+                      icon={{
+                        path: window.google.maps.SymbolPath.FORWARD_CLOSED_ARROW,
+                        scale: 6,
+                        fillColor: '#16a34a',
+                        fillOpacity: 1,
+                        strokeColor: '#ffffff',
+                        strokeWeight: 3
+                      }}
+                      label={{
+                        text: 'Xe',
+                        color: '#ffffff',
+                        fontWeight: '700'
+                      }}
+                    />
+                  ) : null}
+                </GoogleMap>
+                {isCustomerTrackingMode && selectedOrder ? (
+                  <div className={customerRouteIsLive ? 'customer-map-status-card live' : 'customer-map-status-card estimate'}>
+                    <strong>{customerTrackingMessage}</strong>
+                    <span>{selectedOrder.trip_code ? customerTrackingSubline : orderTripStatus}</span>
+                    <div className="customer-map-status-meta">
+                      <span>Xe: {selectedOrder.license_plate || '--'}</span>
+                      <span>Tài xế: {selectedOrder.driver_name || '--'}</span>
+                      <span>GPS: {orderGpsRecordedAt}</span>
+                      <span>Còn lại: {orderRouteProgress ? `${formatNumber(orderRouteProgress.remainingKm, 1)} km` : '--'}</span>
+                    </div>
+                  </div>
+                ) : null}
               </div>
             ) : routeResult && previewPoints.length ? (
               <div className="route-map-shell route-map-fallback">
@@ -1324,18 +1969,81 @@ function RouteMapPage({ orders, token }) {
                   ))}
                 </div>
               </div>
-            ) : mapboxAccessToken ? (
+            ) : isGoogleMapLoaded ? (
               <div className="route-map-shell">
                 <div className="route-map-overlay">
                   <strong>{mapPickTarget === 'origin' ? 'Đang chọn điểm đi' : 'Đang chọn điểm đến'}</strong>
                   <span>Bấm trực tiếp trên bản đồ</span>
                 </div>
-                <div ref={mapContainerRef} className="route-map-canvas" />
+                <GoogleMap
+                  mapContainerClassName="route-map-canvas"
+                  center={googleMapCenter}
+                  zoom={DEFAULT_ROUTE_MAP_ZOOM}
+                  onLoad={(map) => {
+                    googleMapRef.current = map;
+                  }}
+                  onUnmount={() => {
+                    googleMapRef.current = null;
+                  }}
+                  onClick={handleGoogleMapClick}
+                  options={{
+                    streetViewControl: false,
+                    mapTypeControl: false,
+                    fullscreenControl: false
+                  }}
+                />
               </div>
             ) : (
               <div className="route-map-canvas route-map-empty">
                 <p className="muted">Nhập tuyến đường rồi bấm "Tính lộ trình" để xem hành trình.</p>
               </div>
+            )}
+          </div>
+
+          <div className="panel stack">
+            <h3>{isCustomerTrackingMode ? 'Tình trạng giao vận' : 'Panel nghiệp vụ'}</h3>
+            {selectedTrip ? (
+              <>
+                <div className="route-summary-grid">
+                  <StatCard label="Tổng quãng đường" value={routeResult?.distanceText || '--'} />
+                  <StatCard label="ETA" value={routeResult?.durationText || '--'} />
+                  <StatCard label="Tổng tải trọng" value={selectedTripWeight ? `${formatNumber(selectedTripWeight, 2)} tấn` : '--'} />
+                  <StatCard label="Chi phí đơn hàng" value={selectedTripRevenue ? formatCurrency(selectedTripRevenue) : '--'} />
+                </div>
+                <div className="route-business-grid">
+                  <div className="route-business-item"><strong>Mã chuyến</strong><span>{selectedTrip.trip_code}</span></div>
+                  <div className="route-business-item"><strong>Xe phụ trách</strong><span>{selectedTrip.license_plate || '--'}</span></div>
+                  <div className="route-business-item"><strong>Tài xế</strong><span>{selectedTrip.driver_name || '--'}</span></div>
+                  <div className="route-business-item"><strong>Trạng thái</strong><span>{getStatusLabel(selectedTrip.status)}</span></div>
+                  <div className="route-business-item"><strong>Số đơn trong chuyến</strong><span>{selectedTrip.orders?.length || 0}</span></div>
+                  <div className="route-business-item"><strong>GPS hiện tại</strong><span>{formatCoordinateLabel(selectedTrip.latest_location)}</span></div>
+                </div>
+              </>
+            ) : selectedOrder ? (
+              <>
+                <div className="route-summary-grid">
+                  <StatCard label="Quãng đường" value={routeResult?.distanceText || '--'} />
+                  <StatCard label="ETA" value={routeResult?.durationText || '--'} />
+                  <StatCard label="Tải trọng" value={selectedOrder.weight_tons ? `${formatNumber(selectedOrder.weight_tons, 2)} tấn` : '--'} />
+                  <StatCard label="Giá cước" value={selectedOrder.planned_revenue ? formatCurrency(selectedOrder.planned_revenue) : '--'} />
+                </div>
+                <div className="route-business-grid">
+                  <div className="route-business-item"><strong>Mã đơn</strong><span>{selectedOrder.order_code}</span></div>
+                  <div className="route-business-item"><strong>Khách hàng</strong><span>{selectedOrder.customer_name || '--'}</span></div>
+                  <div className="route-business-item"><strong>Loại hàng</strong><span>{selectedOrder.cargo_type || '--'}</span></div>
+                  <div className="route-business-item"><strong>Trạng thái đơn</strong><span>{getStatusLabel(selectedOrder.status)}</span></div>
+                  <div className="route-business-item"><strong>Chuyến đang gán</strong><span>{selectedOrder.trip_code || '--'}</span></div>
+                  <div className="route-business-item"><strong>Trạng thái chuyến</strong><span>{orderTripStatus}</span></div>
+                  <div className="route-business-item"><strong>Xe phụ trách</strong><span>{selectedOrder.license_plate || '--'}</span></div>
+                  <div className="route-business-item"><strong>Tài xế</strong><span>{selectedOrder.driver_name || '--'}</span></div>
+                  <div className="route-business-item"><strong>Vị trí xe hiện tại</strong><span>{orderGpsLocationLabel}</span></div>
+                  <div className="route-business-item"><strong>Cập nhật GPS</strong><span>{orderGpsRecordedAt}</span></div>
+                  <div className="route-business-item"><strong>Quãng đường còn lại</strong><span>{orderRouteProgress ? `${formatNumber(orderRouteProgress.remainingKm, 1)} km` : '--'}</span></div>
+                  <div className="route-business-item"><strong>Tiến độ ước tính</strong><span>{orderRouteProgress ? `${formatNumber(orderRouteProgress.percent, 0)}%` : '--'}</span></div>
+                </div>
+              </>
+            ) : (
+              <p className="muted">Chọn một đơn hàng hoặc chuyến hàng để xem nhanh thông tin nghiệp vụ và lộ trình tương ứng.</p>
             )}
           </div>
 
@@ -1373,7 +2081,7 @@ function RouteMapPage({ orders, token }) {
                 </div>
               </>
             ) : (
-              <p className="muted">Nhập tuyến đường rồi bấm "Tính lộ trình" để xem bản đồ và thời gian dự kiến từ backend geocode.</p>
+              <p className="muted">Nhập tuyến đường rồi bấm "Tính lộ trình" để xem bản đồ và thời gian dự kiến từ dữ liệu định vị của hệ thống.</p>
             )}
           </div>
         </div>
@@ -1386,6 +2094,7 @@ function OptimizerPage({ orders, trucks, token }) {
   const [optimizerInputs, setOptimizerInputs] = useState({ orders: [], trucks: [] });
   const sourceOrders = optimizerInputs.orders.length ? optimizerInputs.orders : orders;
   const sourceTrucks = optimizerInputs.trucks.length ? optimizerInputs.trucks : trucks;
+  const depotSuggestions = optimizerInputs.depotSuggestions?.length ? optimizerInputs.depotSuggestions : ['TP.HCM', 'Đà Nẵng', 'Hà Nội', 'Bình Dương', 'Nha Trang'];
   const candidateOrders = useMemo(
     () => sourceOrders.filter((order) => ['PENDING_DISPATCH', 'ASSIGNED'].includes(order.status)),
     [sourceOrders]
@@ -1409,6 +2118,8 @@ function OptimizerPage({ orders, trucks, token }) {
   const [loading, setLoading] = useState(false);
   const [inputLoading, setInputLoading] = useState(false);
   const [error, setError] = useState('');
+  const [proposalMeta, setProposalMeta] = useState(null);
+  const [hasManualSelection, setHasManualSelection] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -1422,6 +2133,7 @@ function OptimizerPage({ orders, trucks, token }) {
           return;
         }
         setOptimizerInputs({
+          depotSuggestions: data.depotSuggestions || [],
           orders: data.orders || [],
           trucks: data.trucks || []
         });
@@ -1473,8 +2185,39 @@ function OptimizerPage({ orders, trucks, token }) {
     });
   }, [candidateOrders]);
 
+  useEffect(() => {
+    if (!candidateOrders.length || !candidateTrucks.length) {
+      return;
+    }
+
+    if (hasManualSelection) {
+      return;
+    }
+
+    const proposal = buildOptimizerProposal(candidateOrders, candidateTrucks, depotSuggestions);
+    setDepot(proposal.depot);
+    setSelectedTruckIds(proposal.selectedTruckIds);
+    setSelectedOrderIds(proposal.selectedOrderIds);
+    setProposalMeta(proposal);
+  }, [candidateOrders, candidateTrucks, depotSuggestions, hasManualSelection]);
+
+  function applyOptimizerProposal() {
+    const proposal = buildOptimizerProposal(candidateOrders, candidateTrucks, depotSuggestions);
+    setDepot(proposal.depot);
+    setSelectedTruckIds(proposal.selectedTruckIds);
+    setSelectedOrderIds(proposal.selectedOrderIds);
+    setProposalMeta(proposal);
+    setHasManualSelection(false);
+  }
+
   function toggleSelection(id, setter, values) {
+    setHasManualSelection(true);
     setter(values.includes(id) ? values.filter((value) => value !== id) : [...values, id]);
+  }
+
+  function updateDepot(value) {
+    setHasManualSelection(true);
+    setDepot(value);
   }
 
   async function handleOptimize(event) {
@@ -1519,6 +2262,14 @@ function OptimizerPage({ orders, trucks, token }) {
     }
   }
 
+  async function handleAutoOptimize() {
+    applyOptimizerProposal();
+    setTimeout(() => {
+      const form = document.getElementById('optimizer-form');
+      form?.requestSubmit();
+    }, 0);
+  }
+
   return (
     <section className="stack">
       <div className="page-header">
@@ -1532,13 +2283,37 @@ function OptimizerPage({ orders, trucks, token }) {
         <div className="panel stack">
           <div>
             <h3>Dữ liệu đầu vào</h3>
-            <p className="muted">Chọn kho, đội xe và các đơn hàng cần tối ưu. Hệ thống sẽ phân tuyến theo tải trọng và khung giờ giao.</p>
+            <p className="muted">Hệ thống tự đề xuất kho, đội xe và nhóm đơn phù hợp theo tải trọng. Bạn có thể chạy ngay hoặc chỉnh tay trước khi tối ưu.</p>
           </div>
 
-          <form className="stack" onSubmit={handleOptimize}>
+          {proposalMeta ? (
+            <div className="panel route-leg-panel">
+              <h4>Đề xuất tự động</h4>
+              <p className="muted">
+                Kho xuất phát <strong>{proposalMeta.depot}</strong>, {proposalMeta.selectedTruckIds.length} xe,
+                {' '}{proposalMeta.selectedOrderIds.length} đơn, tổng tải {formatNumber(proposalMeta.totalWeightTons, 1)} tấn /
+                {' '}sức chở {formatNumber(proposalMeta.totalCapacityTons, 1)} tấn.
+              </p>
+              <div className="form-actions">
+                <button type="button" className="secondary-button" onClick={applyOptimizerProposal}>
+                  Áp dụng đề xuất
+                </button>
+                <button type="button" className="primary-button" onClick={handleAutoOptimize} disabled={loading}>
+                  {loading ? 'Đang tối ưu...' : 'Đề xuất và chạy tối ưu'}
+                </button>
+              </div>
+            </div>
+          ) : null}
+
+          <form className="stack" id="optimizer-form" onSubmit={handleOptimize}>
             <label>
               Kho xuất phát
-              <input value={depot} onChange={(event) => setDepot(event.target.value)} placeholder="Ví dụ: TP.HCM" />
+              <input value={depot} onChange={(event) => updateDepot(event.target.value)} placeholder="Ví dụ: TP.HCM" list="optimizer-depot-suggestions" />
+              <datalist id="optimizer-depot-suggestions">
+                {depotSuggestions.map((suggestion) => (
+                  <option key={suggestion} value={suggestion} />
+                ))}
+              </datalist>
             </label>
 
             <div className="stack">
@@ -1577,21 +2352,26 @@ function OptimizerPage({ orders, trucks, token }) {
                       />
                       <div>
                         <strong>{order.order_code}</strong>
-                        <p>{order.customer_name} | {order.delivery_location} | {order.weight_tons} tấn</p>
+                        <p>{order.customer_name}</p>
+                        <small>{formatRouteLabel(order.pickup_location, order.delivery_location)}</small>
+                        <p>{order.weight_tons} tấn | {formatCurrency(order.planned_revenue)} | {getStatusLabel(order.status)}</p>
                       </div>
                     </label>
                     <div className="time-window-grid">
                       <label className="checkbox-inline">
-                        <input
-                          type="checkbox"
-                          checked={Boolean(timeWindowMap[order.id]?.useTimeWindow)}
-                          onChange={(event) =>
+                      <input
+                        type="checkbox"
+                        checked={Boolean(timeWindowMap[order.id]?.useTimeWindow)}
+                        onChange={(event) =>
+                          {
+                            setHasManualSelection(true);
                             setTimeWindowMap((prev) => ({
                               ...prev,
                               [order.id]: { ...prev[order.id], useTimeWindow: event.target.checked }
-                            }))
+                            }));
                           }
-                        />
+                        }
+                      />
                         <span>Ràng buộc giờ giao</span>
                       </label>
                       <label>
@@ -1601,10 +2381,13 @@ function OptimizerPage({ orders, trucks, token }) {
                           value={timeWindowMap[order.id]?.windowStart || '08:00'}
                           disabled={!timeWindowMap[order.id]?.useTimeWindow}
                           onChange={(event) =>
-                            setTimeWindowMap((prev) => ({
-                              ...prev,
-                              [order.id]: { ...prev[order.id], windowStart: event.target.value }
-                            }))
+                            {
+                              setHasManualSelection(true);
+                              setTimeWindowMap((prev) => ({
+                                ...prev,
+                                [order.id]: { ...prev[order.id], windowStart: event.target.value }
+                              }));
+                            }
                           }
                         />
                       </label>
@@ -1615,10 +2398,13 @@ function OptimizerPage({ orders, trucks, token }) {
                           value={timeWindowMap[order.id]?.windowEnd || '18:00'}
                           disabled={!timeWindowMap[order.id]?.useTimeWindow}
                           onChange={(event) =>
-                            setTimeWindowMap((prev) => ({
-                              ...prev,
-                              [order.id]: { ...prev[order.id], windowEnd: event.target.value }
-                            }))
+                            {
+                              setHasManualSelection(true);
+                              setTimeWindowMap((prev) => ({
+                                ...prev,
+                                [order.id]: { ...prev[order.id], windowEnd: event.target.value }
+                              }));
+                            }
                           }
                         />
                       </label>
@@ -1630,10 +2416,13 @@ function OptimizerPage({ orders, trucks, token }) {
                           step="5"
                           value={timeWindowMap[order.id]?.serviceMinutes || 20}
                           onChange={(event) =>
-                            setTimeWindowMap((prev) => ({
-                              ...prev,
-                              [order.id]: { ...prev[order.id], serviceMinutes: Number(event.target.value) }
-                            }))
+                            {
+                              setHasManualSelection(true);
+                              setTimeWindowMap((prev) => ({
+                                ...prev,
+                                [order.id]: { ...prev[order.id], serviceMinutes: Number(event.target.value) }
+                              }));
+                            }
                           }
                         />
                       </label>
@@ -1675,17 +2464,20 @@ function OptimizerPage({ orders, trucks, token }) {
                 <span className="status-badge" style={{ background: '#1f6feb' }}>{route.utilizationPercent}% tải</span>
               </div>
               <div className="route-meta">
-                <p><strong>Tổng quãng đường:</strong> {route.totalDistanceKm} km</p>
-                <p><strong>Tổng thời gian:</strong> {route.totalDurationMinutes} phút</p>
+                <p><strong>Tổng quãng đường:</strong> {formatNumber(route.totalDistanceKm, 1)} km</p>
+                <p><strong>Tổng thời gian:</strong> {formatMinutesAsDuration(route.totalDurationMinutes)}</p>
               </div>
               <div className="route-steps">
                 {route.stops.map((stop, index) => (
                   <div key={stop.orderId} className="route-step">
                     <div className="route-step-index">{index + 1}</div>
                     <div>
-                      <p><strong>{stop.orderCode}</strong> - {stop.destination}</p>
+                      <p><strong>{stop.orderCode}</strong> - {normalizeAddressLabel(stop.destination)}</p>
                       <small>
-                        {stop.weightTons} tấn | ETA {stop.arrivalTime} | Cửa giao {stop.windowLabel} | Chặng trước {stop.distanceFromPreviousKm} km
+                        {stop.pickupLocation ? `Lấy: ${normalizeAddressLabel(stop.pickupLocation)} → Giao: ${normalizeAddressLabel(stop.destination)}` : `Giao: ${normalizeAddressLabel(stop.destination)}`}
+                      </small>
+                      <small>
+                        {formatNumber(stop.weightTons, 1)} tấn | ETA {formatPlanningClockLabel(stop.arrivalTime)} | Cửa giao {formatPlanningClockLabel(stop.windowLabel.split(' - ')[0])} - {formatPlanningClockLabel(stop.windowLabel.split(' - ')[1])} | Chặng trước {formatNumber(stop.distanceFromPreviousKm, 1)} km
                       </small>
                     </div>
                   </div>
@@ -2039,6 +2831,7 @@ function UsersPage({ rows, form, setForm, onSave, onEdit, onDelete }) {
                 <option value="ADMIN">Quản trị viên</option>
                 <option value="DISPATCHER">Điều phối viên</option>
                 <option value="DRIVER">Tài xế</option>
+                <option value="CUSTOMER">Khách hàng</option>
               </select>
             </label>
             <label>
@@ -2082,6 +2875,8 @@ function UsersPage({ rows, form, setForm, onSave, onEdit, onDelete }) {
 }
 
 function OrdersPage({ rows, customers, form, setForm, onSave, onEdit }) {
+  const navigate = useNavigate();
+
   return (
     <section className="stack">
       <div className="page-header">
@@ -2092,55 +2887,69 @@ function OrdersPage({ rows, customers, form, setForm, onSave, onEdit }) {
       </div>
       <div className="resource-grid">
         <div className="panel">
-          <h3>{form.id ? 'Cập nhật đơn hàng' : 'Tạo đơn hàng mới'}</h3>
-          <form
-            className="stack"
-            onSubmit={(event) => {
-              event.preventDefault();
-              onSave();
-            }}
-          >
-            <label>
-              Khách hàng
-              <select value={form.customer_id} onChange={(event) => setForm((prev) => ({ ...prev, customer_id: event.target.value }))}>
-                <option value="">Chọn khách hàng</option>
-                {customers.map((customer) => (
-                  <option key={customer.id} value={customer.id}>{customer.name}</option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Mã đơn
-              <input value={form.order_code} onChange={(event) => setForm((prev) => ({ ...prev, order_code: event.target.value }))} />
-            </label>
-            <label>
-              Điểm lấy hàng
-              <input value={form.pickup_location} onChange={(event) => setForm((prev) => ({ ...prev, pickup_location: event.target.value }))} />
-            </label>
-            <label>
-              Điểm giao hàng
-              <input value={form.delivery_location} onChange={(event) => setForm((prev) => ({ ...prev, delivery_location: event.target.value }))} />
-            </label>
-            <label>
-              Loại hàng
-              <input value={form.cargo_type} onChange={(event) => setForm((prev) => ({ ...prev, cargo_type: event.target.value }))} />
-            </label>
-            <label>
-              Trọng tải (tấn)
-              <input type="number" step="0.1" value={form.weight_tons} onChange={(event) => setForm((prev) => ({ ...prev, weight_tons: event.target.value }))} />
-            </label>
-            <label>
-              Doanh thu dự kiến
-              <input type="number" value={form.planned_revenue} onChange={(event) => setForm((prev) => ({ ...prev, planned_revenue: event.target.value }))} />
-            </label>
-            <label>
-              Trạng thái
-              <select value={form.status} onChange={(event) => setForm((prev) => ({ ...prev, status: event.target.value }))}>
-                {orderStatusOptions.map((status) => <option key={status} value={status}>{getStatusLabel(status)}</option>)}
-              </select>
-            </label>
-            <button className="primary-button">{form.id ? 'Lưu đơn hàng' : 'Tạo đơn hàng'}</button>
-          </form>
+          <h3>{form.id ? 'Cập nhật đơn hàng' : 'Quyền tạo đơn thuộc khách hàng'}</h3>
+          {form.id ? (
+            <form
+              className="stack"
+              onSubmit={(event) => {
+                event.preventDefault();
+                onSave();
+              }}
+            >
+              <label>
+                Khách hàng
+                <select value={form.customer_id} onChange={(event) => setForm((prev) => ({ ...prev, customer_id: event.target.value }))}>
+                  <option value="">Chọn khách hàng</option>
+                  {customers.map((customer) => (
+                    <option key={customer.id} value={customer.id}>{customer.name}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Mã đơn
+                <input value={form.order_code} onChange={(event) => setForm((prev) => ({ ...prev, order_code: event.target.value }))} />
+              </label>
+              <label>
+                Điểm lấy hàng
+                <input value={form.pickup_location} onChange={(event) => setForm((prev) => ({ ...prev, pickup_location: event.target.value }))} />
+              </label>
+              <label>
+                Điểm giao hàng
+                <input value={form.delivery_location} onChange={(event) => setForm((prev) => ({ ...prev, delivery_location: event.target.value }))} />
+              </label>
+              <label>
+                Loại hàng
+                <input value={form.cargo_type} onChange={(event) => setForm((prev) => ({ ...prev, cargo_type: event.target.value }))} />
+              </label>
+              <label>
+                Trọng tải (tấn)
+                <input type="number" step="0.1" value={form.weight_tons} onChange={(event) => setForm((prev) => ({ ...prev, weight_tons: event.target.value }))} />
+              </label>
+              <label>
+                Doanh thu dự kiến
+                <input type="number" value={form.planned_revenue} onChange={(event) => setForm((prev) => ({ ...prev, planned_revenue: event.target.value }))} />
+              </label>
+              <label>
+                Trạng thái
+                <select value={form.status} onChange={(event) => setForm((prev) => ({ ...prev, status: event.target.value }))}>
+                  {orderStatusOptions.map((status) => <option key={status} value={status}>{getStatusLabel(status)}</option>)}
+                </select>
+              </label>
+              <div className="section-row">
+                <button className="primary-button">Lưu đơn hàng</button>
+                <button type="button" className="inline-button" onClick={() => setForm(defaultOrderForm())}>Hủy chọn</button>
+              </div>
+            </form>
+          ) : (
+            <div className="stack">
+              <p className="muted">
+                Khách hàng tự tạo đơn từ cổng khách hàng. Điều phối chỉ tiếp nhận, cập nhật trạng thái và phân công đơn đã được gửi lên hệ thống.
+              </p>
+              <p className="muted">
+                Chọn một đơn ở danh sách bên phải để chỉnh sửa hoặc xử lý nghiệp vụ tiếp theo.
+              </p>
+            </div>
+          )}
         </div>
         <div className="panel">
           <h3>Danh sách đơn hàng</h3>
@@ -2162,11 +2971,32 @@ function OrdersPage({ rows, customers, form, setForm, onSave, onEdit }) {
                   <tr key={row.id}>
                     <td>{row.order_code}</td>
                     <td>{row.customer_name}</td>
-                    <td>{row.pickup_location} - {row.delivery_location}</td>
+                    <td>{formatRouteLabel(row.pickup_location, row.delivery_location)}</td>
                     <td>{row.cargo_type}</td>
                     <td><span className="status-badge" style={{ background: statusColor(row.status) }}>{getStatusLabel(row.status)}</span></td>
                     <td>{formatCurrency(row.planned_revenue)}</td>
-                    <td><button className="inline-button" onClick={() => onEdit(row)}>Sửa</button></td>
+                    <td className="action-cell">
+                      <div className="action-row">
+                        <button
+                          className="inline-button action-button"
+                          onClick={() =>
+                            onEdit({
+                              ...row,
+                              pickup_location: normalizeAddressLabel(row.pickup_location),
+                              delivery_location: normalizeAddressLabel(row.delivery_location)
+                            })
+                          }
+                        >
+                          Sửa đơn
+                        </button>
+                        <button
+                          className="inline-button action-button"
+                          onClick={() => navigate(`/route-map?mode=order&orderId=${row.id}`)}
+                        >
+                          Xem bản đồ
+                        </button>
+                      </div>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -2178,22 +3008,142 @@ function OrdersPage({ rows, customers, form, setForm, onSave, onEdit }) {
   );
 }
 
+function CustomerOrdersPage({ profile, rows, form, setForm, quote, quoteLoading, quoteError, onSave }) {
+  const navigate = useNavigate();
+
+  return (
+    <section className="stack">
+      <div className="page-header">
+        <div>
+          <p className="eyebrow">Khách hàng</p>
+          <h2>Đơn hàng của tôi</h2>
+        </div>
+      </div>
+      <div className="resource-grid">
+        <div className="panel stack">
+          <h3>Thông tin tài khoản</h3>
+          {profile ? (
+            <>
+              <div><strong>Tên khách hàng:</strong> {profile.name}</div>
+              <div><strong>Số điện thoại:</strong> {profile.phone || '--'}</div>
+              <div><strong>Email:</strong> {profile.email || '--'}</div>
+              <div><strong>Địa chỉ:</strong> {profile.address || '--'}</div>
+            </>
+          ) : (
+            <p className="muted">Chưa tìm thấy hồ sơ khách hàng gắn với tài khoản này.</p>
+          )}
+        </div>
+        <div className="panel stack">
+          <h3>Tạo đơn hàng mới</h3>
+          <form
+            className="stack"
+            onSubmit={(event) => {
+              event.preventDefault();
+              onSave();
+            }}
+          >
+            <label>
+              Điểm lấy hàng
+              <input value={form.pickup_location} onChange={(event) => setForm((prev) => ({ ...prev, pickup_location: event.target.value }))} />
+            </label>
+            <label>
+              Điểm giao hàng
+              <input value={form.delivery_location} onChange={(event) => setForm((prev) => ({ ...prev, delivery_location: event.target.value }))} />
+            </label>
+            <label>
+              Loại hàng
+              <input value={form.cargo_type} onChange={(event) => setForm((prev) => ({ ...prev, cargo_type: event.target.value }))} />
+            </label>
+            <label>
+              Trọng lượng (tấn)
+              <input type="number" step="0.1" value={form.weight_tons} onChange={(event) => setForm((prev) => ({ ...prev, weight_tons: event.target.value }))} />
+            </label>
+            <label>
+              Giá cước dự kiến
+              <input type="text" value={form.planned_revenue ? formatCurrency(form.planned_revenue) : quoteLoading ? 'Đang tính...' : ''} readOnly />
+            </label>
+            {quote ? (
+              <p className="muted">
+                Quãng đường ước tính: <strong>{quote.distanceText}</strong> · Thời gian dự kiến: <strong>{quote.durationText}</strong>
+              </p>
+            ) : null}
+            {quoteError ? <p className="error-message">{quoteError}</p> : null}
+            <button className="primary-button">Gửi yêu cầu đặt đơn</button>
+          </form>
+        </div>
+      </div>
+      <div className="panel">
+        <h3>Danh sách đơn hàng</h3>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Mã đơn</th>
+                <th>Tuyến</th>
+                <th>Hàng hóa</th>
+                <th>Giá cước</th>
+                <th>Trạng thái đơn</th>
+                <th>Chuyến</th>
+                <th>Trạng thái chuyến</th>
+                <th>Vị trí gần nhất</th>
+                <th>Thao tác</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row) => (
+                <tr key={row.id}>
+                  <td>{row.order_code}</td>
+                  <td>{formatRouteLabel(row.pickup_location, row.delivery_location)}</td>
+                  <td>{row.cargo_type}</td>
+                  <td>{formatCurrency(row.planned_revenue)}</td>
+                  <td><span className="status-badge" style={{ background: statusColor(row.status) }}>{getStatusLabel(row.status)}</span></td>
+                  <td>{row.trip_code || '--'}</td>
+                  <td>{row.trip_status ? <span className="status-badge" style={{ background: statusColor(row.trip_status) }}>{getStatusLabel(row.trip_status)}</span> : '--'}</td>
+                  <td>
+                    {row.latest_latitude && row.latest_longitude
+                      ? `${formatNumber(row.latest_latitude, 5)}, ${formatNumber(row.latest_longitude, 5)}`
+                      : 'Chưa có'}
+                  </td>
+                  <td className="action-cell">
+                    <button className="inline-button" onClick={() => navigate(`/customer/route-map?mode=order&orderId=${row.id}`)}>
+                      Xem bản đồ
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function TrackingPage({ token, trips }) {
+  const apiBaseUrl = import.meta.env.VITE_API_URL || 'http://localhost:4000';
   const [latest, setLatest] = useState([]);
+  const [devices, setDevices] = useState([]);
   const [selectedTripId, setSelectedTripId] = useState('');
   const [history, setHistory] = useState([]);
   const [form, setForm] = useState({ latitude: '', longitude: '', speed_kmh: '', heading: '', note: '' });
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const sseRef = useRef(null);
 
   async function loadTracking(tripId = selectedTripId) {
     setLoading(true);
     setError('');
     try {
-      const latestRows = await apiRequest('/tracking/latest', { token });
+      const [latestRows, deviceRows] = await Promise.all([
+        apiRequest('/tracking/latest', { token }),
+        apiRequest('/tracking/devices', { token })
+      ]);
       setLatest(latestRows);
+      setDevices(deviceRows);
       if (tripId) {
         setHistory(await apiRequest(`/tracking/trips/${tripId}/locations`, { token }));
+      } else {
+        setHistory([]);
       }
     } catch (loadError) {
       setError(loadError.message);
@@ -2208,6 +3158,48 @@ function TrackingPage({ token, trips }) {
       setLoading(false);
     });
   }, []);
+
+  useEffect(() => {
+    if (!token) {
+      return undefined;
+    }
+
+    const streamUrl = `${apiBaseUrl}/tracking/stream?token=${encodeURIComponent(token)}${selectedTripId ? `&tripId=${encodeURIComponent(selectedTripId)}` : ''}`;
+    const source = new EventSource(streamUrl);
+    sseRef.current = source;
+
+    source.addEventListener('location', (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        setLatest((prev) => {
+          const next = prev.filter((item) => item.trip_id !== payload.trip_id);
+          return [payload, ...next].sort((a, b) => new Date(b.recorded_at) - new Date(a.recorded_at));
+        });
+        if (selectedTripId && Number(selectedTripId) === Number(payload.trip_id)) {
+          setHistory((prev) => [...prev, payload].sort((a, b) => new Date(a.recorded_at) - new Date(b.recorded_at)));
+        }
+        setDevices((prev) =>
+          prev.map((device) =>
+            payload.gps_device_id && Number(device.id) === Number(payload.gps_device_id)
+              ? { ...device, last_seen_at: payload.recorded_at }
+              : device
+          )
+        );
+      } catch (streamError) {
+        console.error(streamError);
+      }
+    });
+
+    source.onerror = () => {
+      source.close();
+      sseRef.current = null;
+    };
+
+    return () => {
+      source.close();
+      sseRef.current = null;
+    };
+  }, [apiBaseUrl, selectedTripId, token]);
 
   async function handleSubmit(event) {
     event.preventDefault();
@@ -2258,7 +3250,7 @@ function TrackingPage({ token, trips }) {
       <div className="page-header">
         <div>
           <p className="eyebrow">Giám sát</p>
-          <h2>GPS realtime đội xe</h2>
+          <h2>GPS thời gian thực đội xe</h2>
         </div>
         <button className="inline-button" onClick={() => loadTracking(selectedTripId)}>
           {loading ? 'Đang tải...' : 'Làm mới'}
@@ -2270,7 +3262,39 @@ function TrackingPage({ token, trips }) {
         <div className="panel stack">
           <div>
             <h3>Ghi tọa độ xe</h3>
-            <p className="muted">Dispatcher có thể nhập tọa độ test; tài xế có thể dùng nút lấy vị trí trên màn chuyến được giao.</p>
+            <p className="muted">Dispatcher có thể nhập tọa độ test; tài xế có thể dùng nút lấy vị trí trên màn chuyến được giao; thiết bị GPS thật có thể đẩy dữ liệu qua token riêng.</p>
+          </div>
+          <div className="panel stack" style={{ padding: '16px', background: '#f8fafc' }}>
+            <div>
+              <strong>Thiết bị GPS đang kết nối</strong>
+              <p className="muted">Dùng endpoint công khai <code>/tracking/device/ingest</code> với header <code>x-device-token</code> để mô phỏng thiết bị thật gửi tọa độ.</p>
+            </div>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Mã thiết bị</th>
+                    <th>Token</th>
+                    <th>Chuyến</th>
+                    <th>Xe</th>
+                    <th>Tài xế</th>
+                    <th>Lần cuối gửi</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {devices.map((device) => (
+                    <tr key={device.id}>
+                      <td>{device.device_code}</td>
+                      <td><code>{device.device_token}</code></td>
+                      <td>{device.trip_code || '--'}</td>
+                      <td>{device.license_plate || '--'}</td>
+                      <td>{device.driver_name || '--'}</td>
+                      <td>{device.last_seen_at || 'Chưa có tín hiệu'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
           <form className="stack" onSubmit={handleSubmit}>
             <label>
@@ -2327,6 +3351,8 @@ function TrackingPage({ token, trips }) {
               <thead>
                 <tr>
                   <th>Chuyến</th>
+                  <th>Nguồn</th>
+                  <th>Thiết bị</th>
                   <th>Xe</th>
                   <th>Tài xế</th>
                   <th>Tọa độ</th>
@@ -2338,6 +3364,8 @@ function TrackingPage({ token, trips }) {
                 {latest.map((row) => (
                   <tr key={row.id}>
                     <td>{row.trip_code}</td>
+                    <td>{row.source === 'GPS_DEVICE' ? 'Thiết bị GPS' : row.source === 'DISPATCHER' ? 'Điều phối' : 'Trình duyệt'}</td>
+                    <td>{row.device_code || '--'}</td>
                     <td>{row.license_plate}</td>
                     <td>{row.driver_name}</td>
                     <td>{formatNumber(row.latitude, 6)}, {formatNumber(row.longitude, 6)}</td>
@@ -2358,6 +3386,8 @@ function TrackingPage({ token, trips }) {
             <thead>
               <tr>
                 <th>#</th>
+                <th>Nguồn</th>
+                <th>Thiết bị</th>
                 <th>Latitude</th>
                 <th>Longitude</th>
                 <th>Tốc độ</th>
@@ -2369,6 +3399,8 @@ function TrackingPage({ token, trips }) {
               {history.map((row, index) => (
                 <tr key={row.id}>
                   <td>{index + 1}</td>
+                  <td>{row.source === 'GPS_DEVICE' ? 'Thiết bị GPS' : row.source === 'DISPATCHER' ? 'Điều phối' : 'Trình duyệt'}</td>
+                  <td>{row.device_code || '--'}</td>
                   <td>{formatNumber(row.latitude, 7)}</td>
                   <td>{formatNumber(row.longitude, 7)}</td>
                   <td>{row.speed_kmh ?? '--'}</td>
@@ -2541,6 +3573,8 @@ function DriverLocationControls({ trip, token }) {
 }
 
 function TripsPage({ trips, auth, onTripStatus, refresh, token }) {
+  const navigate = useNavigate();
+
   useEffect(() => {
     refresh('trips').catch((error) => {
       console.error(error);
@@ -2581,6 +3615,9 @@ function TripsPage({ trips, auth, onTripStatus, refresh, token }) {
               )}
             </div>
             <div className="action-row">
+              <button className="inline-button" onClick={() => navigate(`/route-map?mode=trip&tripId=${trip.id}`)}>
+                Theo dõi chuyến
+              </button>
               {trip.status !== 'IN_TRANSIT' ? (
                 <button className="primary-button" onClick={() => onTripStatus(trip.id, 'IN_TRANSIT')}>
                   Bắt đầu vận chuyển
@@ -2647,6 +3684,16 @@ function defaultOrderForm() {
   };
 }
 
+function defaultCustomerPortalOrderForm() {
+  return {
+    pickup_location: '',
+    delivery_location: '',
+    cargo_type: '',
+    weight_tons: '',
+    planned_revenue: ''
+  };
+}
+
 function defaultTripForm() {
   return {
     trip_code: '',
@@ -2668,6 +3715,7 @@ export default function App() {
   const [drivers, setDrivers] = useState([]);
   const [customers, setCustomers] = useState([]);
   const [orders, setOrders] = useState([]);
+  const [customerProfile, setCustomerProfile] = useState(null);
   const [trips, setTrips] = useState([]);
   const [users, setUsers] = useState([]);
   const [depots, setDepots] = useState([]);
@@ -2675,6 +3723,10 @@ export default function App() {
   const [driverForm, setDriverForm] = useState(defaultDriverForm());
   const [customerForm, setCustomerForm] = useState(defaultCustomerForm());
   const [orderForm, setOrderForm] = useState(defaultOrderForm());
+  const [customerPortalOrderForm, setCustomerPortalOrderForm] = useState(defaultCustomerPortalOrderForm());
+  const [customerQuote, setCustomerQuote] = useState(null);
+  const [customerQuoteLoading, setCustomerQuoteLoading] = useState(false);
+  const [customerQuoteError, setCustomerQuoteError] = useState('');
   const [tripForm, setTripForm] = useState(defaultTripForm());
   const [userForm, setUserForm] = useState({ username: '', full_name: '', role: 'DISPATCHER', password: '' });
   const [depotForm, setDepotForm] = useState({ depot_code: '', name: '', location: '', latitude: '', longitude: '', status: 'ACTIVE' });
@@ -2685,6 +3737,9 @@ export default function App() {
 
   const token = auth.token;
   const role = auth.user?.role;
+  const isBackoffice = role === 'ADMIN' || role === 'DISPATCHER';
+  const isDriver = role === 'DRIVER';
+  const isCustomer = role === 'CUSTOMER';
 
   const loadAll = useMemo(
     () => async (target = 'all') => {
@@ -2692,33 +3747,41 @@ export default function App() {
         return;
       }
 
-      if (role !== 'DRIVER' && (target === 'all' || target === 'dashboard')) {
+      if (isBackoffice && (target === 'all' || target === 'dashboard')) {
         const summaryData = await apiRequest('/reports/summary', { token });
         setSummary(summaryData);
       }
       if (role === 'ADMIN' && (target === 'all' || target === 'users')) {
         setUsers(await apiRequest('/users', { token }));
       }
-      if (role !== 'DRIVER' && (target === 'all' || target === 'depots')) {
+      if (isBackoffice && (target === 'all' || target === 'depots')) {
         setDepots(await apiRequest('/depots', { token }));
       }
-      if (role !== 'DRIVER' && (target === 'all' || target === 'trucks')) {
+      if (isBackoffice && (target === 'all' || target === 'trucks')) {
         setTrucks(await apiRequest('/trucks', { token }));
       }
-      if (role !== 'DRIVER' && (target === 'all' || target === 'drivers')) {
+      if (isBackoffice && (target === 'all' || target === 'drivers')) {
         setDrivers(await apiRequest('/drivers', { token }));
       }
-      if (role !== 'DRIVER' && (target === 'all' || target === 'customers')) {
+      if (isBackoffice && (target === 'all' || target === 'customers')) {
         setCustomers(await apiRequest('/customers', { token }));
       }
-      if (role !== 'DRIVER' && (target === 'all' || target === 'orders' || target === 'dispatch')) {
+      if (isBackoffice && (target === 'all' || target === 'orders' || target === 'dispatch')) {
         setOrders(await apiRequest('/orders', { token }));
       }
-      if (target === 'all' || target === 'trips' || target === 'dispatch') {
+      if (isCustomer && (target === 'all' || target === 'customer-orders')) {
+        const [profile, ownOrders] = await Promise.all([
+          apiRequest('/customer-portal/profile', { token }),
+          apiRequest('/customer-portal/orders', { token })
+        ]);
+        setCustomerProfile(profile);
+        setOrders(ownOrders);
+      }
+      if (!isCustomer && (target === 'all' || target === 'trips' || target === 'dispatch')) {
         setTrips(await apiRequest('/trips', { token }));
       }
     },
-    [token, role]
+    [isBackoffice, isCustomer, token, role]
   );
 
   useEffect(() => {
@@ -2757,8 +3820,12 @@ export default function App() {
       target = 'drivers';
     } else if (location.pathname.startsWith('/customers')) {
       target = 'customers';
-    } else if (location.pathname.startsWith('/orders') || location.pathname.startsWith('/route-map')) {
+    } else if (location.pathname.startsWith('/customer/orders') || location.pathname.startsWith('/customer/route-map')) {
+      target = 'customer-orders';
+    } else if (location.pathname.startsWith('/orders')) {
       target = 'orders';
+    } else if (location.pathname.startsWith('/route-map')) {
+      target = 'dispatch';
     } else if (location.pathname.startsWith('/dispatch') || location.pathname.startsWith('/tracking')) {
       target = 'dispatch';
     } else if (location.pathname.startsWith('/trips') || location.pathname.startsWith('/driver/trips')) {
@@ -2769,6 +3836,81 @@ export default function App() {
       console.error(error);
     });
   }, [location.pathname, loadAll, token]);
+
+  useEffect(() => {
+    if (!isCustomer || !token) {
+      return undefined;
+    }
+
+    const pickupLocation = customerPortalOrderForm.pickup_location.trim();
+    const deliveryLocation = customerPortalOrderForm.delivery_location.trim();
+    const weightTons = Number(customerPortalOrderForm.weight_tons);
+
+    if (!pickupLocation || !deliveryLocation || !Number.isFinite(weightTons) || weightTons <= 0) {
+      setCustomerQuote(null);
+      setCustomerQuoteError('');
+      setCustomerPortalOrderForm((prev) => (prev.planned_revenue ? { ...prev, planned_revenue: '' } : prev));
+      return undefined;
+    }
+
+    let active = true;
+    const timer = setTimeout(async () => {
+      setCustomerQuoteLoading(true);
+      setCustomerQuoteError('');
+      try {
+        const quote = await apiRequest('/customer-portal/orders/quote', {
+          token,
+          method: 'POST',
+          body: {
+            pickup_location: pickupLocation,
+            delivery_location: deliveryLocation,
+            weight_tons: weightTons
+          }
+        });
+        if (!active) {
+          return;
+        }
+        setCustomerQuote(quote);
+        setCustomerPortalOrderForm((prev) => {
+          if (
+            prev.pickup_location.trim() !== pickupLocation ||
+            prev.delivery_location.trim() !== deliveryLocation ||
+            Number(prev.weight_tons) !== weightTons
+          ) {
+            return prev;
+          }
+          return {
+            ...prev,
+            pickup_location: quote.pickupLocationNormalized || prev.pickup_location,
+            delivery_location: quote.deliveryLocationNormalized || prev.delivery_location,
+            planned_revenue: String(quote.estimatedPrice || '')
+          };
+        });
+      } catch (error) {
+        if (!active) {
+          return;
+        }
+        setCustomerQuote(null);
+        setCustomerQuoteError(error.message);
+        setCustomerPortalOrderForm((prev) => (prev.planned_revenue ? { ...prev, planned_revenue: '' } : prev));
+      } finally {
+        if (active) {
+          setCustomerQuoteLoading(false);
+        }
+      }
+    }, 500);
+
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [
+    customerPortalOrderForm.delivery_location,
+    customerPortalOrderForm.pickup_location,
+    customerPortalOrderForm.weight_tons,
+    isCustomer,
+    token
+  ]);
 
   async function handleLogin(credentials) {
     setLoginLoading(true);
@@ -2784,7 +3926,7 @@ export default function App() {
         }
       };
       setAuth(normalizedAuth);
-      navigate(normalizedAuth.user.role === 'DRIVER' ? '/driver/trips' : '/');
+      navigate(normalizedAuth.user.role === 'DRIVER' ? '/driver/trips' : normalizedAuth.user.role === 'CUSTOMER' ? '/customer/orders' : '/');
     } catch (error) {
       setLoginError(error.message);
     } finally {
@@ -2826,6 +3968,24 @@ export default function App() {
     await loadAll('dispatch');
   }
 
+  async function saveCustomerPortalOrder() {
+    if (!customerPortalOrderForm.planned_revenue) {
+      throw new Error('Chưa tính được giá cước cho đơn hàng này.');
+    }
+    await apiRequest('/customer-portal/orders', {
+      token,
+      method: 'POST',
+      body: {
+        ...customerPortalOrderForm,
+        weight_tons: Number(customerPortalOrderForm.weight_tons)
+      }
+    });
+    setCustomerPortalOrderForm(defaultCustomerPortalOrderForm());
+    setCustomerQuote(null);
+    setCustomerQuoteError('');
+    await loadAll('customer-orders');
+  }
+
   async function assignOrders(tripId, orderIds) {
     if (!orderIds.length) return;
     await apiRequest(`/trips/${tripId}/assign-orders`, {
@@ -2856,7 +4016,7 @@ export default function App() {
   return (
     <Layout auth={auth} onLogout={handleLogout}>
       <Routes>
-        {role !== 'DRIVER' ? (
+        {isBackoffice ? (
           <>
             <Route path="/" element={<DashboardPage summary={summary} />} />
             <Route path="/forecasting" element={<ForecastingPage token={token} trucks={trucks} refreshTrucks={loadAll} />} />
@@ -2969,7 +4129,7 @@ export default function App() {
             ) : null}
             {role === 'DISPATCHER' ? (
               <>
-            <Route path="/route-map" element={<RouteMapPage orders={orders} token={token} />} />
+            <Route path="/route-map" element={<RouteMapPage orders={orders} trips={trips} token={token} />} />
             <Route path="/tracking" element={<TrackingPage token={token} trips={trips} />} />
             <Route path="/optimizer" element={<OptimizerPage orders={orders} trucks={trucks} token={token} />} />
             <Route path="/optimizer-history" element={<OptimizerHistoryPage token={token} />} />
@@ -3006,14 +4166,34 @@ export default function App() {
               </>
             ) : null}
           </>
-        ) : (
+        ) : isDriver ? (
           <>
             <Route path="/driver/trips" element={<TripsPage trips={trips} auth={auth} onTripStatus={updateTripStatus} refresh={loadAll} token={token} />} />
             <Route path="*" element={<Navigate to="/driver/trips" replace />} />
           </>
+        ) : (
+          <>
+            <Route
+              path="/customer/orders"
+              element={
+                <CustomerOrdersPage
+                  profile={customerProfile}
+                  rows={orders}
+                  form={customerPortalOrderForm}
+                  setForm={setCustomerPortalOrderForm}
+                  quote={customerQuote}
+                  quoteLoading={customerQuoteLoading}
+                  quoteError={customerQuoteError}
+                  onSave={saveCustomerPortalOrder}
+                />
+              }
+            />
+            <Route path="/customer/route-map" element={<RouteMapPage orders={orders} trips={[]} token={token} apiNamespace="customer-portal" />} />
+            <Route path="*" element={<Navigate to="/customer/orders" replace />} />
+          </>
         )}
-        <Route path="/login" element={<Navigate to={role === 'DRIVER' ? '/driver/trips' : '/'} replace />} />
-        <Route path="*" element={<Navigate to={role === 'DRIVER' ? '/driver/trips' : '/'} replace />} />
+        <Route path="/login" element={<Navigate to={role === 'DRIVER' ? '/driver/trips' : role === 'CUSTOMER' ? '/customer/orders' : '/'} replace />} />
+        <Route path="*" element={<Navigate to={role === 'DRIVER' ? '/driver/trips' : role === 'CUSTOMER' ? '/customer/orders' : '/'} replace />} />
       </Routes>
     </Layout>
   );

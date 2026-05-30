@@ -1,24 +1,28 @@
 import jwt from 'jsonwebtoken';
 
 const rolePriority = {
-  DRIVER: 1,
-  DISPATCHER: 2,
-  ADMIN: 3
+  CUSTOMER: 1,
+  DRIVER: 2,
+  DISPATCHER: 3,
+  ADMIN: 4
 };
 
 const roleById = {
   1: 'ADMIN',
   2: 'DISPATCHER',
-  3: 'DRIVER'
+  3: 'DRIVER',
+  4: 'CUSTOMER'
 };
 
 export function authenticate(req, res, next) {
   const authHeader = req.headers.authorization;
-  if (!authHeader?.startsWith('Bearer ')) {
+  const tokenFromHeader = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : '';
+  const tokenFromQuery = typeof req.query?.token === 'string' ? req.query.token : '';
+  const token = tokenFromHeader || tokenFromQuery;
+
+  if (!token) {
     return res.status(401).json({ message: 'Missing or invalid authorization header.' });
   }
-
-  const token = authHeader.slice(7);
 
   try {
     const payload = jwt.verify(token, process.env.JWT_SECRET || 'super-secret-demo-key');

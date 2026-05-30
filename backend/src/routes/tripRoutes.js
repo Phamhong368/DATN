@@ -38,6 +38,7 @@ router.get(
     const tripIds = trips.map((trip) => trip.id);
     let orders = [];
     let logs = [];
+    let latestLocations = [];
     if (tripIds.length) {
       const placeholders = tripIds.map(() => '?').join(', ');
       orders = await query(
@@ -54,12 +55,29 @@ router.get(
          ORDER BY created_at DESC`,
         tripIds
       );
+      latestLocations = await query(
+        `SELECT tl.trip_id, tl.latitude, tl.longitude, tl.speed_kmh, tl.heading, tl.recorded_at,
+                tl.source, tl.note, gd.device_code
+         FROM trip_location_logs tl
+         LEFT JOIN gps_devices gd ON gd.id = tl.gps_device_id
+         WHERE tl.trip_id IN (${placeholders})
+         ORDER BY tl.recorded_at DESC, tl.id DESC`,
+        tripIds
+      );
+    }
+
+    const latestLocationMap = new Map();
+    for (const location of latestLocations) {
+      if (!latestLocationMap.has(location.trip_id)) {
+        latestLocationMap.set(location.trip_id, location);
+      }
     }
 
     const response = trips.map((trip) => ({
       ...trip,
       orders: orders.filter((order) => order.trip_id === trip.id),
-      logs: logs.filter((log) => log.trip_id === trip.id)
+      logs: logs.filter((log) => log.trip_id === trip.id),
+      latest_location: latestLocationMap.get(trip.id) || null
     }));
 
     res.json(response);

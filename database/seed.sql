@@ -35,7 +35,8 @@ ALTER TABLE route_optimization_stops AUTO_INCREMENT = 1;
 INSERT INTO roles (name) VALUES
   ('ADMIN'),
   ('DISPATCHER'),
-  ('DRIVER');
+  ('DRIVER'),
+  ('CUSTOMER');
 
 INSERT INTO users (role_id, username, password_hash, full_name) VALUES
   (1, 'admin', '$2a$10$1irC5egGwuVQOUpI1kYVCe.ULkmhcqj466dP1IYIoxjC94Pn/7SPS', 'Nguyễn Văn Admin'),

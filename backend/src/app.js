@@ -5,13 +5,14 @@ import authRoutes from './routes/authRoutes.js'
 import truckRoutes from './routes/truckRoutes.js'
 import driverRoutes from './routes/driverRoutes.js'
 import customerRoutes from './routes/customerRoutes.js'
+import customerPortalRoutes from './routes/customerPortalRoutes.js'
 import orderRoutes from './routes/orderRoutes.js'
 import tripRoutes from './routes/tripRoutes.js'
 import reportRoutes from './routes/reportRoutes.js'
 import optimizerRoutes from './routes/optimizerRoutes.js'
 import analyticsRoutes from './routes/analyticsRoutes.js'
 import userRoutes from './routes/userRoutes.js'
-import trackingRoutes from './routes/trackingRoutes.js'
+import trackingRoutes, { trackingPublicRouter } from './routes/trackingRoutes.js'
 import { authenticate, authorize } from './middleware/auth.js'
 import cors from 'cors'
 import path from 'path'
@@ -37,11 +38,13 @@ app.use('/auth', authRoutes)
 app.use('/trucks', authenticate, authorize('DISPATCHER'), truckRoutes)
 app.use('/drivers', authenticate, authorize('DISPATCHER'), driverRoutes)
 app.use('/customers', authenticate, authorize('DISPATCHER'), customerRoutes)
+app.use('/customer-portal', authenticate, customerPortalRoutes)
 app.use('/orders', authenticate, authorize('DISPATCHER'), orderRoutes)
 app.use('/trips', authenticate, tripRoutes)
 app.use('/reports', authenticate, authorize('DISPATCHER'), reportRoutes)
 app.use('/optimizer', authenticate, authorize('DISPATCHER'), optimizerRoutes)
 app.use('/analytics', authenticate, authorize('DISPATCHER'), analyticsRoutes)
+app.use('/tracking', trackingPublicRouter)
 app.use('/tracking', authenticate, trackingRoutes)
 app.use('/users', authenticate, authorize('ADMIN'), userRoutes)
 

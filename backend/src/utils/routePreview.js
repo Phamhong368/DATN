@@ -12,6 +12,10 @@ const MAPBOX_PROFILES = {
   TRANSIT: 'driving'
 };
 
+function getGoogleMapsApiKey() {
+  return process.env.GOOGLE_MAPS_API_KEY || process.env.VITE_GOOGLE_MAPS_API_KEY || '';
+}
+
 function getMapboxAccessToken() {
   return process.env.MAPBOX_ACCESS_TOKEN || process.env.VITE_MAPBOX_ACCESS_TOKEN || '';
 }
@@ -45,6 +49,47 @@ function formatDuration(durationMinutes) {
   const hours = Math.floor(durationMinutes / 60);
   const minutes = durationMinutes % 60;
   return minutes ? `${hours} giờ ${minutes} phút` : `${hours} giờ`;
+}
+
+function decodeGooglePolyline(encoded) {
+  if (!encoded) {
+    return [];
+  }
+
+  const coordinates = [];
+  let index = 0;
+  let lat = 0;
+  let lng = 0;
+
+  while (index < encoded.length) {
+    let result = 0;
+    let shift = 0;
+    let byte = null;
+
+    do {
+      byte = encoded.charCodeAt(index) - 63;
+      index += 1;
+      result |= (byte & 0x1f) << shift;
+      shift += 5;
+    } while (byte >= 0x20);
+
+    lat += result & 1 ? ~(result >> 1) : result >> 1;
+
+    result = 0;
+    shift = 0;
+
+    do {
+      byte = encoded.charCodeAt(index) - 63;
+      index += 1;
+      result |= (byte & 0x1f) << shift;
+      shift += 5;
+    } while (byte >= 0x20);
+
+    lng += result & 1 ? ~(result >> 1) : result >> 1;
+    coordinates.push({ lat: lat / 1e5, lng: lng / 1e5 });
+  }
+
+  return coordinates;
 }
 
 function buildFallbackRoutePreview({ origin, destination, waypoints = [], travelMode = 'DRIVING' }) {
@@ -155,10 +200,85 @@ async function buildMapboxRoutePreview({ origin, destination, waypoints = [], tr
   };
 }
 
+async function buildGoogleRoutePreview({ origin, destination, waypoints = [], travelMode = 'DRIVING' }) {
+  const apiKey = getGoogleMapsApiKey();
+  if (!apiKey) {
+    throw new Error('Thiếu GOOGLE_MAPS_API_KEY trên backend.');
+  }
+
+  const url = new URL('https://maps.googleapis.com/maps/api/directions/json');
+  url.searchParams.set('origin', `${origin.coordinate.lat},${origin.coordinate.lng}`);
+  url.searchParams.set('destination', `${destination.coordinate.lat},${destination.coordinate.lng}`);
+  url.searchParams.set('mode', String(travelMode || 'DRIVING').toLowerCase());
+  url.searchParams.set('language', 'vi');
+  url.searchParams.set('region', 'vn');
+  url.searchParams.set('key', apiKey);
+
+  if (waypoints.length) {
+    url.searchParams.set(
+      'waypoints',
+      waypoints.map((stop) => `${stop.coordinate.lat},${stop.coordinate.lng}`).join('|')
+    );
+  }
+
+  const response = await fetch(url, {
+    headers: {
+      Accept: 'application/json'
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(`Google Directions API trả về HTTP ${response.status}.`);
+  }
+
+  const payload = await response.json();
+  if (payload.status !== 'OK' || !payload.routes?.length) {
+    const details = payload.error_message ? ` ${payload.error_message}` : '';
+    throw new Error(`Google Directions thất bại với trạng thái ${payload.status}.${details}`.trim());
+  }
+
+  const nodes = [origin, ...waypoints, destination];
+  const route = payload.routes[0];
+  const legs = (route.legs || []).map((leg, index) => ({
+    segmentNo: index + 1,
+    startAddress: leg.start_address || nodes[index]?.address || '',
+    endAddress: leg.end_address || nodes[index + 1]?.address || '',
+    distanceKm: Number(((leg.distance?.value || 0) / 1000).toFixed(1)),
+    durationMinutes: Math.max(1, Math.round((leg.duration?.value || 0) / 60)),
+    distanceText: leg.distance?.text || formatDistance((leg.distance?.value || 0) / 1000),
+    durationText: leg.duration?.text || formatDuration(Math.max(1, Math.round((leg.duration?.value || 0) / 60))),
+    startCoordinate: nodes[index]?.coordinate,
+    endCoordinate: nodes[index + 1]?.coordinate
+  }));
+
+  const totalDistanceKm = Number(((legs.reduce((sum, leg) => sum + leg.distanceKm, 0)) || 0).toFixed(1));
+  const totalDurationMinutes = legs.reduce((sum, leg) => sum + leg.durationMinutes, 0);
+
+  return {
+    startAddress: route.legs?.[0]?.start_address || origin.address,
+    endAddress: route.legs?.[route.legs.length - 1]?.end_address || destination.address,
+    travelMode,
+    distanceKm: totalDistanceKm,
+    durationMinutes: totalDurationMinutes,
+    distanceText: formatDistance(totalDistanceKm),
+    durationText: formatDuration(totalDurationMinutes),
+    stops: nodes.map((node) => ({
+      address: node.address,
+      coordinate: node.coordinate
+    })),
+    path: decodeGooglePolyline(route.overview_polyline?.points),
+    legs
+  };
+}
+
 export async function buildRoutePreview({ origin, destination, waypoints = [], travelMode = 'DRIVING' }) {
   try {
-    return await buildMapboxRoutePreview({ origin, destination, waypoints, travelMode });
+    return await buildGoogleRoutePreview({ origin, destination, waypoints, travelMode });
   } catch {
-    return buildFallbackRoutePreview({ origin, destination, waypoints, travelMode });
+    try {
+      return await buildMapboxRoutePreview({ origin, destination, waypoints, travelMode });
+    } catch {
+      return buildFallbackRoutePreview({ origin, destination, waypoints, travelMode });
+    }
   }
 }

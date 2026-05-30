@@ -169,7 +169,7 @@ router.get(
     const [orders, trucks] = await Promise.all([
       query(
         `SELECT orders.id, orders.order_code, orders.pickup_location, orders.delivery_location, orders.cargo_type,
-                orders.weight_tons, orders.status, customers.name AS customer_name
+                orders.weight_tons, orders.status, orders.planned_revenue, customers.name AS customer_name
          FROM orders
          JOIN customers ON customers.id = orders.customer_id
          WHERE orders.status IN ('PENDING_DISPATCH', 'ASSIGNED')

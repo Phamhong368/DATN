@@ -21,39 +21,9 @@ router.get(
 router.post(
   '/',
   asyncHandler(async (req, res) => {
-    const missing = ensureFields(req.body, [
-      'customer_id',
-      'order_code',
-      'pickup_location',
-      'delivery_location',
-      'cargo_type',
-      'weight_tons',
-      'planned_revenue'
-    ]);
-    if (missing.length) {
-      return res.status(400).json({ message: `Missing fields: ${missing.join(', ')}` });
-    }
-
-    const {
-      customer_id,
-      order_code,
-      pickup_location,
-      delivery_location,
-      cargo_type,
-      weight_tons,
-      planned_revenue,
-      status = 'PENDING_DISPATCH'
-    } = req.body;
-
-    const result = await query(
-      `INSERT INTO orders (
-          customer_id, order_code, pickup_location, delivery_location,
-          cargo_type, weight_tons, planned_revenue, status
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [customer_id, order_code, pickup_location, delivery_location, cargo_type, weight_tons, planned_revenue, status]
-    );
-    const rows = await query('SELECT * FROM orders WHERE id = ?', [result.insertId]);
-    res.status(201).json(rows[0]);
+    res.status(403).json({
+      message: 'Đơn hàng mới phải được tạo từ cổng khách hàng. Điều phối chỉ được quản lý và cập nhật đơn hiện có.'
+    });
   })
 );
 
@@ -83,4 +53,3 @@ router.put(
 );
 
 export default router;
-
