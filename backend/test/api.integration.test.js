@@ -18,6 +18,7 @@ let dbModule;
 let adminToken;
 let dispatcherToken;
 let driverToken;
+let customerToken;
 
 function splitSqlStatements(sql) {
   return sql
@@ -157,6 +158,7 @@ if (!shouldRun) {
     adminToken = await loginAs('admin');
     dispatcherToken = await loginAs('dispatcher');
     driverToken = await loginAs('driver1');
+    customerToken = await loginAs('customer1');
 
     const summary = await api('/reports/summary', { token: dispatcherToken });
     assert.equal(summary.response.status, 200);
@@ -179,9 +181,9 @@ if (!shouldRun) {
     assert.ok(adminAllowed.payload.some((user) => user.username === 'admin'));
   });
 
-  test('orders API creates and returns a real order row', async () => {
+  test('dispatcher cannot create a new order directly after customer-portal migration', async () => {
     const orderCode = `ORD-IT-${Date.now()}`;
-    const created = await api('/orders', {
+    const denied = await api('/orders', {
       method: 'POST',
       token: dispatcherToken,
       body: {
@@ -196,18 +198,36 @@ if (!shouldRun) {
       }
     });
 
+    assert.equal(denied.response.status, 403);
+    assert.match(denied.payload.message, /khách hàng/i);
+  });
+
+  test('customer portal creates and returns a real order row', async () => {
+    const orderCode = `ORD-IT-${Date.now()}`;
+    const created = await api('/customer-portal/orders', {
+      method: 'POST',
+      token: customerToken,
+      body: {
+        order_code: orderCode,
+        pickup_location: 'TP.HCM',
+        delivery_location: 'Đà Nẵng',
+        cargo_type: 'Integration test cargo',
+        weight_tons: 2.5
+      }
+    });
+
     assert.equal(created.response.status, 201);
     assert.equal(created.payload.order_code, orderCode);
 
-    const orders = await api('/orders', { token: dispatcherToken });
+    const orders = await api('/customer-portal/orders', { token: customerToken });
     assert.equal(orders.response.status, 200);
     assert.ok(orders.payload.some((order) => order.order_code === orderCode));
   });
 
-  test('orders API returns validation error for missing required fields', async () => {
-    const invalid = await api('/orders', {
+  test('customer portal returns validation error for missing required fields', async () => {
+    const invalid = await api('/customer-portal/orders', {
       method: 'POST',
-      token: dispatcherToken,
+      token: customerToken,
       body: {
         order_code: 'ORD-MISSING'
       }
@@ -215,7 +235,7 @@ if (!shouldRun) {
 
     assert.equal(invalid.response.status, 400);
     assert.match(invalid.payload.message, /Missing fields/);
-    assert.match(invalid.payload.message, /customer_id/);
+    assert.match(invalid.payload.message, /pickup_location/);
   });
 
   test('admin can create, update and delete a truck through protected CRUD API', async () => {
