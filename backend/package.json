@@ -9,7 +9,10 @@
     "test": "node --test",
     "test:integration": "RUN_DB_TESTS=1 node --test test/api.integration.test.js",
     "smoke": "node scripts/smoke.mjs",
-    "benchmark:vrp": "node scripts/benchmark-vrp.mjs"
+    "benchmark:vrp": "node scripts/benchmark-vrp.mjs",
+    "benchmark:vrp:comparison": "node scripts/benchmark-vrp-comparison.mjs",
+    "benchmark:kaggle-route": "node scripts/benchmark-kaggle-route-optimization.mjs",
+    "benchmark:fuel": "node scripts/benchmark-fuel-regression.mjs"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

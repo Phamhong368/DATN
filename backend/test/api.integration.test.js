@@ -372,8 +372,10 @@ if (!shouldRun) {
     });
 
     assert.equal(preview.response.status, 200);
-    assert.equal(preview.payload.startAddress, 'TP.HCM');
-    assert.equal(preview.payload.endAddress, 'Đà Nẵng');
+    assert.ok(preview.payload.startAddress);
+    assert.ok(preview.payload.endAddress);
+    assert.equal(preview.payload.stops[0].address, 'TP.HCM');
+    assert.equal(preview.payload.stops.at(-1).address, 'Đà Nẵng');
     assert.ok(preview.payload.distanceKm > 0);
   });
 
